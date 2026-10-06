@@ -4,6 +4,7 @@ const router = express.Router();
 
 const {
   createPitch,
+  getAllPitches,
   getOwnerPitches,
   getOwnerPitchById,
   updatePitch,
@@ -12,6 +13,18 @@ const {
 
 const { authenticateToken } = require("../middleware/authMiddleware");
 const { authorizeRoles } = require("../middleware/roleMiddleware");
+
+
+// ========================================
+// PLAYER - GET ALL APPROVED PITCHES
+// ========================================
+
+router.get(
+  "/",
+  authenticateToken,
+  authorizeRoles("player"),
+  getAllPitches
+);
 
 
 // ========================================

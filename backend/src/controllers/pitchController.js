@@ -526,11 +526,58 @@ const deletePitch = async (req, res) => {
 };
 
 // ========================================
+// GET ALL APPROVED PITCHES - PLAYER
+// ========================================
+
+const getAllPitches = async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        owner_id,
+        city_id,
+        name,
+        description,
+        address,
+        latitude,
+        longitude,
+        pitch_type,
+        capacity,
+        base_price,
+        deposit_amount,
+        status,
+        created_at,
+        updated_at
+      FROM pitches
+      WHERE status = 'approved'
+      ORDER BY created_at DESC
+      `
+    );
+
+    return res.status(200).json({
+      success: true,
+      count: result.rows.length,
+      pitches: result.rows
+    });
+
+  } catch (error) {
+    console.error("GET ALL PITCHES ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to get pitches"
+    });
+  }
+};
+
+// ========================================
 // EXPORT
 // ========================================
 
 module.exports = {
   createPitch,
+  getAllPitches,
   getOwnerPitches,
   getOwnerPitchById,
   updatePitch,
