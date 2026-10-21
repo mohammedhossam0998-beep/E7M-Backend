@@ -203,35 +203,23 @@ const allowedOrigins = (
 app.use(
   cors({
     origin: (origin, callback) => {
-
-      // Allow non-browser requests
-      // such as Postman
-
+      // Allow non-browser requests such as Postman
       if (!origin) {
         return callback(null, true);
       }
 
-      // Allow configured origins
+      // Allow any localhost port (Flutter web / local testing)
+      if (/^https?:\/\/localhost:\d+$/.test(origin)) {
+        return callback(null, true);
+      }
 
+      // Allow configured origins
       if (allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
 
-      // Allow any localhost port
-      // during development
-
-      if (
-        process.env.NODE_ENV !== "production" &&
-        /^https?:\/\/localhost:\d+$/.test(origin)
-      ) {
-        return callback(null, true);
-      }
-
-      return callback(
-        new Error("CORS origin not allowed")
-      );
+      return callback(new Error("CORS origin not allowed"));
     },
-
     credentials: true,
   })
 );
@@ -676,14 +664,12 @@ const io = new Server(httpServer, {
         return callback(null, true);
       }
 
-      if (allowedOrigins.includes(origin)) {
+      // Allow any localhost port
+      if (/^https?:\/\/localhost:\d+$/.test(origin)) {
         return callback(null, true);
       }
 
-      if (
-        process.env.NODE_ENV !== "production" &&
-        /^https?:\/\/localhost:\d+$/.test(origin)
-      ) {
+      if (allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
 
