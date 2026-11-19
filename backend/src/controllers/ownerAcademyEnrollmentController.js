@@ -1,8 +1,27 @@
+
 const pool = require("../config/db");
 
 // ============================================================
-// GET OWNER ID
+// HELPERS
 // ============================================================
+
+// Academy ownership uses owners.id.
+// Stadium ownership uses users.id.
+// Do not mix them.
+
+const validId = (value) => {
+  const id = Number(value);
+
+  return Number.isSafeInteger(id) && id > 0
+    ? id
+    : null;
+};
+
+const sendError = (res, status, message) =>
+  res.status(status).json({
+    success: false,
+    message,
+  });
 
 const getOwnerId = async (userId) => {
   const result = await pool.query(
@@ -11,20 +30,13 @@ const getOwnerId = async (userId) => {
     FROM owners
     WHERE user_id = $1
       AND is_deleted = false
+    LIMIT 1
     `,
     [userId]
   );
 
-  if (result.rows.length === 0) {
-    return null;
-  }
-
-  return result.rows[0].id;
+  return result.rows[0]?.id ?? null;
 };
-
-// ============================================================
-// GET OWNER ACADEMY
-// ============================================================
 
 const getOwnerAcademy = async (
   academyId,
@@ -32,25 +44,15 @@ const getOwnerAcademy = async (
 ) => {
   const result = await pool.query(
     `
-    SELECT
-      id,
-      name,
-      status
+    SELECT id, name, status
     FROM academies
     WHERE id = $1
       AND owner_id = $2
     `,
-    [
-      academyId,
-      ownerId,
-    ]
+    [academyId, ownerId]
   );
 
-  if (result.rows.length === 0) {
-    return null;
-  }
-
-  return result.rows[0];
+  return result.rows[0] ?? null;
 };
 
 // ============================================================
@@ -58,60 +60,44 @@ const getOwnerAcademy = async (
 // GET /api/owner/academies/:academyId/players
 // ============================================================
 
-const getOwnerAcademyPlayers = async (
-  req,
-  res
-) => {
+const getOwnerAcademyPlayers = async (req, res) => {
   try {
-    const userId = req.user.userId;
-    const { academyId } = req.params;
-
-    // ----------------------------------------------------------
-    // VALIDATE ACADEMY ID
-    // ----------------------------------------------------------
+    const academyId = validId(
+      req.params.academyId
+    );
 
     if (!academyId) {
-      return res.status(400).json({
-        success: false,
-        message: "Academy ID is required",
-      });
+      return sendError(
+        res,
+        400,
+        "Invalid academy ID"
+      );
     }
 
-    // ----------------------------------------------------------
-    // GET OWNER
-    // ----------------------------------------------------------
-
-    const ownerId =
-      await getOwnerId(userId);
+    const ownerId = await getOwnerId(
+      req.user?.userId
+    );
 
     if (!ownerId) {
-      return res.status(403).json({
-        success: false,
-        message: "Owner profile not found",
-      });
+      return sendError(
+        res,
+        403,
+        "Owner profile not found"
+      );
     }
 
-    // ----------------------------------------------------------
-    // VERIFY ACADEMY OWNERSHIP
-    // ----------------------------------------------------------
-
-    const academy =
-      await getOwnerAcademy(
-        academyId,
-        ownerId
-      );
+    const academy = await getOwnerAcademy(
+      academyId,
+      ownerId
+    );
 
     if (!academy) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Academy not found or does not belong to you",
-      });
+      return sendError(
+        res,
+        404,
+        "Academy not found or does not belong to you"
+      );
     }
-
-    // ----------------------------------------------------------
-    // GET ENROLLMENTS
-    // ----------------------------------------------------------
 
     const result = await pool.query(
       `
@@ -124,14 +110,12 @@ const getOwnerAcademyPlayers = async (
         ae.enrolled_at,
         ae.updated_at,
 
-        -- PROGRAM
         ap.name AS program_name,
         ap.description AS program_description,
         ap.level AS program_level,
         ap.price AS program_price,
         ap.duration_weeks AS program_duration_weeks,
 
-        -- PLAYER PROFILE
         pp.user_id AS player_user_id,
         pp.position,
         pp.skill_level,
@@ -139,7 +123,6 @@ const getOwnerAcademyPlayers = async (
         pp.preferred_foot,
         pp.bio,
 
-        -- USER
         u.full_name,
         u.email,
         u.phone,
@@ -147,13 +130,13 @@ const getOwnerAcademyPlayers = async (
 
       FROM academy_enrollments ae
 
-      INNER JOIN academy_programs ap
+      JOIN academy_programs ap
         ON ap.id = ae.program_id
 
-      INNER JOIN player_profiles pp
+      JOIN player_profiles pp
         ON pp.id = ae.player_id
 
-      INNER JOIN users u
+      JOIN users u
         ON u.id = pp.user_id
 
       WHERE ae.academy_id = $1
@@ -162,10 +145,6 @@ const getOwnerAcademyPlayers = async (
       `,
       [academyId]
     );
-
-    // ----------------------------------------------------------
-    // RESPONSE
-    // ----------------------------------------------------------
 
     return res.status(200).json({
       success: true,
@@ -179,7 +158,6 @@ const getOwnerAcademyPlayers = async (
       count: result.rows.length,
 
       players: result.rows,
-
       enrollments: result.rows,
     });
 
@@ -189,11 +167,11 @@ const getOwnerAcademyPlayers = async (
       error
     );
 
-    return res.status(500).json({
-      success: false,
-      message:
-        "Failed to get academy players",
-    });
+    return sendError(
+      res,
+      500,
+      "Failed to get academy players"
+    );
   }
 };
 
@@ -207,37 +185,29 @@ const getOwnerEnrollmentById = async (
   res
 ) => {
   try {
-    const userId = req.user.userId;
-    const { id } = req.params;
+    const enrollmentId = validId(
+      req.params.id
+    );
 
-    // ----------------------------------------------------------
-    // VALIDATE ID
-    // ----------------------------------------------------------
-
-    if (!id) {
-      return res.status(400).json({
-        success: false,
-        message: "Enrollment ID is required",
-      });
+    if (!enrollmentId) {
+      return sendError(
+        res,
+        400,
+        "Invalid enrollment ID"
+      );
     }
 
-    // ----------------------------------------------------------
-    // GET OWNER
-    // ----------------------------------------------------------
-
-    const ownerId =
-      await getOwnerId(userId);
+    const ownerId = await getOwnerId(
+      req.user?.userId
+    );
 
     if (!ownerId) {
-      return res.status(403).json({
-        success: false,
-        message: "Owner profile not found",
-      });
+      return sendError(
+        res,
+        403,
+        "Owner profile not found"
+      );
     }
-
-    // ----------------------------------------------------------
-    // GET ENROLLMENT
-    // ----------------------------------------------------------
 
     const result = await pool.query(
       `
@@ -250,18 +220,15 @@ const getOwnerEnrollmentById = async (
         ae.enrolled_at,
         ae.updated_at,
 
-        -- ACADEMY
         a.name AS academy_name,
         a.status AS academy_status,
 
-        -- PROGRAM
         ap.name AS program_name,
         ap.description AS program_description,
         ap.level AS program_level,
         ap.price AS program_price,
         ap.duration_weeks AS program_duration_weeks,
 
-        -- PLAYER PROFILE
         pp.user_id AS player_user_id,
         pp.position,
         pp.skill_level,
@@ -269,7 +236,6 @@ const getOwnerEnrollmentById = async (
         pp.preferred_foot,
         pp.bio,
 
-        -- USER
         u.full_name,
         u.email,
         u.phone,
@@ -277,113 +243,75 @@ const getOwnerEnrollmentById = async (
 
       FROM academy_enrollments ae
 
-      INNER JOIN academies a
+      JOIN academies a
         ON a.id = ae.academy_id
 
-      INNER JOIN academy_programs ap
+      JOIN academy_programs ap
         ON ap.id = ae.program_id
 
-      INNER JOIN player_profiles pp
+      JOIN player_profiles pp
         ON pp.id = ae.player_id
 
-      INNER JOIN users u
+      JOIN users u
         ON u.id = pp.user_id
 
       WHERE ae.id = $1
         AND a.owner_id = $2
       `,
-      [
-        id,
-        ownerId,
-      ]
+      [enrollmentId, ownerId]
     );
 
-    // ----------------------------------------------------------
-    // NOT FOUND
-    // ----------------------------------------------------------
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Enrollment not found or does not belong to you",
-      });
+    if (!result.rows.length) {
+      return sendError(
+        res,
+        404,
+        "Enrollment not found or does not belong to you"
+      );
     }
 
-    const enrollment =
-      result.rows[0];
-
-    // ----------------------------------------------------------
-    // RESPONSE
-    // ----------------------------------------------------------
+    const e = result.rows[0];
 
     return res.status(200).json({
       success: true,
 
       enrollment: {
-        id: enrollment.id,
-        academy_id:
-          enrollment.academy_id,
-        program_id:
-          enrollment.program_id,
-        player_id:
-          enrollment.player_id,
-        status:
-          enrollment.status,
-        enrolled_at:
-          enrollment.enrolled_at,
-        updated_at:
-          enrollment.updated_at,
+        id: e.id,
+        academy_id: e.academy_id,
+        program_id: e.program_id,
+        player_id: e.player_id,
+        status: e.status,
+        enrolled_at: e.enrolled_at,
+        updated_at: e.updated_at,
       },
 
       academy: {
-        id: enrollment.academy_id,
-        name:
-          enrollment.academy_name,
-        status:
-          enrollment.academy_status,
+        id: e.academy_id,
+        name: e.academy_name,
+        status: e.academy_status,
       },
 
       program: {
-        id:
-          enrollment.program_id,
-        name:
-          enrollment.program_name,
-        description:
-          enrollment.program_description,
-        level:
-          enrollment.program_level,
-        price:
-          enrollment.program_price,
-        duration_weeks:
-          enrollment.program_duration_weeks,
+        id: e.program_id,
+        name: e.program_name,
+        description: e.program_description,
+        level: e.program_level,
+        price: e.program_price,
+        duration_weeks: e.program_duration_weeks,
       },
 
       player: {
-        id:
-          enrollment.player_id,
-        user_id:
-          enrollment.player_user_id,
-        full_name:
-          enrollment.full_name,
-        email:
-          enrollment.email,
-        phone:
-          enrollment.phone,
-        profile_image:
-          enrollment.profile_image,
-        position:
-          enrollment.position,
-        skill_level:
-          enrollment.skill_level,
-        date_of_birth:
-          enrollment.date_of_birth,
-        preferred_foot:
-          enrollment.preferred_foot,
-        bio:
-          enrollment.bio,
+        id: e.player_id,
+        user_id: e.player_user_id,
+        full_name: e.full_name,
+        email: e.email,
+        phone: e.phone,
+        profile_image: e.profile_image,
+        position: e.position,
+        skill_level: e.skill_level,
+        date_of_birth: e.date_of_birth,
+        preferred_foot: e.preferred_foot,
+        bio: e.bio,
       },
-
     });
 
   } catch (error) {
@@ -392,113 +320,210 @@ const getOwnerEnrollmentById = async (
       error
     );
 
-    return res.status(500).json({
-      success: false,
-      message:
-        "Failed to get enrollment",
-    });
+    return sendError(
+      res,
+      500,
+      "Failed to get enrollment"
+    );
   }
+};
+
+// ============================================================
+// LOCK AND VERIFY ENROLLMENT OWNERSHIP
+// ============================================================
+
+const lockOwnedEnrollment = async (
+  client,
+  enrollmentId,
+  ownerId
+) => {
+  const result = await client.query(
+    `
+    SELECT
+      ae.id,
+      ae.academy_id,
+      ae.program_id,
+      ae.player_id,
+      ae.status,
+
+      a.name AS academy_name,
+      a.status AS academy_status,
+
+      ap.price AS program_price
+
+    FROM academy_enrollments ae
+
+    JOIN academies a
+      ON a.id = ae.academy_id
+
+    JOIN academy_programs ap
+      ON ap.id = ae.program_id
+      AND ap.academy_id = ae.academy_id
+
+    WHERE ae.id = $1
+      AND a.owner_id = $2
+
+    FOR UPDATE OF ae
+    `,
+    [enrollmentId, ownerId]
+  );
+
+  return result.rows[0] ?? null;
+};
+
+// ============================================================
+// ROLLBACK HELPER
+// ============================================================
+
+const rollbackAndFail = async (
+  client,
+  res,
+  status,
+  message
+) => {
+  await client.query("ROLLBACK");
+
+  return sendError(
+    res,
+    status,
+    message
+  );
 };
 
 // ============================================================
 // APPROVE OWNER ENROLLMENT
 // PATCH /api/owner/enrollments/:id/approve
 // ============================================================
+//
+// Rules:
+//
+// 1. Enrollment must be pending.
+// 2. Free program (price = 0) needs no payment.
+// 3. Paid program requires academy_payments.status = paid.
+// 4. Stadium booking payments are NOT used.
+// 5. Enrollment cannot be approved twice.
+//
+// ============================================================
 
-const approveOwnerEnrollment = async (
-  req,
-  res
-) => {
+const approveOwnerEnrollment = async (req, res) => {
+  const enrollmentId = validId(
+    req.params.id
+  );
+
+  if (!enrollmentId) {
+    return sendError(
+      res,
+      400,
+      "Invalid enrollment ID"
+    );
+  }
+
+  let client;
+
   try {
-    const userId = req.user.userId;
-    const { id } = req.params;
-
-    // ----------------------------------------------------------
-    // VALIDATE ID
-    // ----------------------------------------------------------
-
-    if (!id) {
-      return res.status(400).json({
-        success: false,
-        message: "Enrollment ID is required",
-      });
-    }
-
-    // ----------------------------------------------------------
-    // GET OWNER
-    // ----------------------------------------------------------
-
-    const ownerId =
-      await getOwnerId(userId);
+    const ownerId = await getOwnerId(
+      req.user?.userId
+    );
 
     if (!ownerId) {
-      return res.status(403).json({
-        success: false,
-        message: "Owner profile not found",
-      });
-    }
-
-    // ----------------------------------------------------------
-    // VERIFY ENROLLMENT OWNERSHIP
-    // ----------------------------------------------------------
-
-    const enrollmentResult =
-      await pool.query(
-        `
-        SELECT
-          ae.id,
-          ae.academy_id,
-          ae.program_id,
-          ae.player_id,
-          ae.status,
-
-          a.name AS academy_name,
-          a.status AS academy_status
-
-        FROM academy_enrollments ae
-
-        INNER JOIN academies a
-          ON a.id = ae.academy_id
-
-        WHERE ae.id = $1
-          AND a.owner_id = $2
-        `,
-        [
-          id,
-          ownerId,
-        ]
+      return sendError(
+        res,
+        403,
+        "Owner profile not found"
       );
-
-    if (
-      enrollmentResult.rows.length === 0
-    ) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Enrollment not found or does not belong to you",
-      });
     }
 
-    const enrollment =
-      enrollmentResult.rows[0];
+    client = await pool.connect();
 
-    // ----------------------------------------------------------
-    // ONLY PENDING CAN BE APPROVED
-    // ----------------------------------------------------------
+    await client.query("BEGIN");
+
+    // --------------------------------------------------------
+    // VERIFY OWNER AND LOCK ENROLLMENT
+    // --------------------------------------------------------
+
+    const enrollment = await lockOwnedEnrollment(
+      client,
+      enrollmentId,
+      ownerId
+    );
+
+    if (!enrollment) {
+      return await rollbackAndFail(
+        client,
+        res,
+        404,
+        "Enrollment not found or does not belong to you"
+      );
+    }
+
+    // --------------------------------------------------------
+    // CHECK ENROLLMENT STATUS
+    // --------------------------------------------------------
 
     if (enrollment.status !== "pending") {
-      return res.status(400).json({
-        success: false,
-        message:
-          `Enrollment cannot be approved because its current status is '${enrollment.status}'`,
-      });
+      return await rollbackAndFail(
+        client,
+        res,
+        400,
+        `Enrollment cannot be approved because its current status is '${enrollment.status}'`
+      );
     }
 
-    // ----------------------------------------------------------
-    // UPDATE
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
+    // VALIDATE PROGRAM PRICE
+    // --------------------------------------------------------
 
-    const result = await pool.query(
+    const priceValue = enrollment.program_price;
+    const price = Number(priceValue);
+
+    if (
+      priceValue === null ||
+      priceValue === undefined ||
+      String(priceValue).trim() === "" ||
+      !Number.isFinite(price) ||
+      price < 0
+    ) {
+      return await rollbackAndFail(
+        client,
+        res,
+        409,
+        "Program price is invalid"
+      );
+    }
+
+    // --------------------------------------------------------
+    // CHECK PAYMENT FOR PAID PROGRAMS
+    // --------------------------------------------------------
+
+    if (price > 0) {
+      const paid = await client.query(
+        `
+        SELECT id
+        FROM academy_payments
+        WHERE enrollment_id = $1
+          AND status = 'paid'
+        LIMIT 1
+        `,
+        [enrollmentId]
+      );
+
+      if (!paid.rows.length) {
+        return await rollbackAndFail(
+          client,
+          res,
+          409,
+          "Academy payment must be approved before enrollment approval"
+        );
+      }
+    }
+
+    // Free programs skip the payment requirement.
+
+    // --------------------------------------------------------
+    // APPROVE ENROLLMENT
+    // --------------------------------------------------------
+
+    const updated = await client.query(
       `
       UPDATE academy_enrollments
 
@@ -518,50 +543,62 @@ const approveOwnerEnrollment = async (
         enrolled_at,
         updated_at
       `,
-      [id]
+      [enrollmentId]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(409).json({
-        success: false,
-        message:
-          "Enrollment status changed before approval",
-      });
+    if (!updated.rows.length) {
+      return await rollbackAndFail(
+        client,
+        res,
+        409,
+        "Enrollment status changed before approval"
+      );
     }
 
-    // ----------------------------------------------------------
-    // RESPONSE
-    // ----------------------------------------------------------
+    await client.query("COMMIT");
 
     return res.status(200).json({
       success: true,
+
       message:
         "Academy enrollment approved successfully",
 
       academy: {
-        id:
-          enrollment.academy_id,
-        name:
-          enrollment.academy_name,
-        status:
-          enrollment.academy_status,
+        id: enrollment.academy_id,
+        name: enrollment.academy_name,
+        status: enrollment.academy_status,
       },
 
-      enrollment:
-        result.rows[0],
+      enrollment: updated.rows[0],
     });
 
   } catch (error) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error(
+          "APPROVE ENROLLMENT ROLLBACK ERROR:",
+          rollbackError
+        );
+      }
+    }
+
     console.error(
       "APPROVE OWNER ENROLLMENT ERROR:",
       error
     );
 
-    return res.status(500).json({
-      success: false,
-      message:
-        "Failed to approve enrollment",
-    });
+    return sendError(
+      res,
+      500,
+      "Failed to approve enrollment"
+    );
+
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 };
 
@@ -569,101 +606,129 @@ const approveOwnerEnrollment = async (
 // REJECT OWNER ENROLLMENT
 // PATCH /api/owner/enrollments/:id/reject
 // ============================================================
+//
+// Rules:
+//
+// 1. Enrollment must be pending.
+// 2. Cannot reject if academy payment is pending.
+// 3. Cannot reject if academy payment is paid.
+// 4. Reject payment first if it is still pending.
+// 5. Paid payments require a separate refund process.
+//
+// ============================================================
 
-const rejectOwnerEnrollment = async (
-  req,
-  res
-) => {
+const rejectOwnerEnrollment = async (req, res) => {
+  const enrollmentId = validId(
+    req.params.id
+  );
+
+  if (!enrollmentId) {
+    return sendError(
+      res,
+      400,
+      "Invalid enrollment ID"
+    );
+  }
+
+  let client;
+
   try {
-    const userId = req.user.userId;
-    const { id } = req.params;
-
-    // ----------------------------------------------------------
-    // VALIDATE ID
-    // ----------------------------------------------------------
-
-    if (!id) {
-      return res.status(400).json({
-        success: false,
-        message: "Enrollment ID is required",
-      });
-    }
-
-    // ----------------------------------------------------------
-    // GET OWNER
-    // ----------------------------------------------------------
-
-    const ownerId =
-      await getOwnerId(userId);
+    const ownerId = await getOwnerId(
+      req.user?.userId
+    );
 
     if (!ownerId) {
-      return res.status(403).json({
-        success: false,
-        message: "Owner profile not found",
-      });
-    }
-
-    // ----------------------------------------------------------
-    // VERIFY ENROLLMENT OWNERSHIP
-    // ----------------------------------------------------------
-
-    const enrollmentResult =
-      await pool.query(
-        `
-        SELECT
-          ae.id,
-          ae.academy_id,
-          ae.program_id,
-          ae.player_id,
-          ae.status,
-
-          a.name AS academy_name,
-          a.status AS academy_status
-
-        FROM academy_enrollments ae
-
-        INNER JOIN academies a
-          ON a.id = ae.academy_id
-
-        WHERE ae.id = $1
-          AND a.owner_id = $2
-        `,
-        [
-          id,
-          ownerId,
-        ]
+      return sendError(
+        res,
+        403,
+        "Owner profile not found"
       );
-
-    if (
-      enrollmentResult.rows.length === 0
-    ) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Enrollment not found or does not belong to you",
-      });
     }
 
-    const enrollment =
-      enrollmentResult.rows[0];
+    client = await pool.connect();
 
-    // ----------------------------------------------------------
-    // ONLY PENDING CAN BE REJECTED
-    // ----------------------------------------------------------
+    await client.query("BEGIN");
+
+    // --------------------------------------------------------
+    // VERIFY OWNER AND LOCK ENROLLMENT
+    // --------------------------------------------------------
+
+    const enrollment = await lockOwnedEnrollment(
+      client,
+      enrollmentId,
+      ownerId
+    );
+
+    if (!enrollment) {
+      return await rollbackAndFail(
+        client,
+        res,
+        404,
+        "Enrollment not found or does not belong to you"
+      );
+    }
+
+    // --------------------------------------------------------
+    // CHECK ENROLLMENT STATUS
+    // --------------------------------------------------------
 
     if (enrollment.status !== "pending") {
-      return res.status(400).json({
-        success: false,
-        message:
-          `Enrollment cannot be rejected because its current status is '${enrollment.status}'`,
-      });
+      return await rollbackAndFail(
+        client,
+        res,
+        400,
+        `Enrollment cannot be rejected because its current status is '${enrollment.status}'`
+      );
     }
 
-    // ----------------------------------------------------------
-    // UPDATE
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
+    // CHECK EXISTING ACADEMY PAYMENTS
+    // --------------------------------------------------------
 
-    const result = await pool.query(
+    const activePayment = await client.query(
+      `
+      SELECT
+        id,
+        status
+
+      FROM academy_payments
+
+      WHERE enrollment_id = $1
+        AND status IN ('pending', 'paid')
+
+      ORDER BY id DESC
+
+      LIMIT 1
+      `,
+      [enrollmentId]
+    );
+
+    if (activePayment.rows.length) {
+      const paymentStatus =
+        activePayment.rows[0].status;
+
+      if (paymentStatus === "paid") {
+        return await rollbackAndFail(
+          client,
+          res,
+          409,
+          "Paid enrollment requires a refund review before rejection"
+        );
+      }
+
+      return await rollbackAndFail(
+        client,
+        res,
+        409,
+        "Review or reject the pending academy payment first"
+      );
+    }
+
+    // --------------------------------------------------------
+    // REJECT ENROLLMENT
+    // --------------------------------------------------------
+
+    const updated = await client.query(
       `
       UPDATE academy_enrollments
 
@@ -683,55 +748,67 @@ const rejectOwnerEnrollment = async (
         enrolled_at,
         updated_at
       `,
-      [id]
+      [enrollmentId]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(409).json({
-        success: false,
-        message:
-          "Enrollment status changed before rejection",
-      });
+    if (!updated.rows.length) {
+      return await rollbackAndFail(
+        client,
+        res,
+        409,
+        "Enrollment status changed before rejection"
+      );
     }
 
-    // ----------------------------------------------------------
-    // RESPONSE
-    // ----------------------------------------------------------
+    await client.query("COMMIT");
 
     return res.status(200).json({
       success: true,
+
       message:
         "Academy enrollment rejected successfully",
 
       academy: {
-        id:
-          enrollment.academy_id,
-        name:
-          enrollment.academy_name,
-        status:
-          enrollment.academy_status,
+        id: enrollment.academy_id,
+        name: enrollment.academy_name,
+        status: enrollment.academy_status,
       },
 
-      enrollment:
-        result.rows[0],
+      enrollment: updated.rows[0],
     });
 
   } catch (error) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error(
+          "REJECT ENROLLMENT ROLLBACK ERROR:",
+          rollbackError
+        );
+      }
+    }
+
     console.error(
       "REJECT OWNER ENROLLMENT ERROR:",
       error
     );
 
-    return res.status(500).json({
-      success: false,
-      message:
-        "Failed to reject enrollment",
-    });
+    return sendError(
+      res,
+      500,
+      "Failed to reject enrollment"
+    );
+
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 };
 
 // ============================================================
-// EXPORT
+// EXPORTS
 // ============================================================
 
 module.exports = {

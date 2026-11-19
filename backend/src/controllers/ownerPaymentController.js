@@ -1,6 +1,142 @@
+
 const pool = require("../config/db");
 const { createNotification } = require("./notificationController");
 
+// ============================================================
+// HELPERS
+// ============================================================
+
+// pitches.owner_id = users.id
+// owner_payment_accounts.owner_id = owners.id
+
+const PARTIAL_PAYMENT_STATUS = "pending";
+
+const toCents = (value) =>
+  Math.round(Number(value) * 100);
+
+const isValidId = (value) =>
+  Number.isSafeInteger(Number(value)) &&
+  Number(value) > 0;
+
+const getOwnerProfile = async (userId) => {
+  const result = await pool.query(
+    `
+    SELECT id
+    FROM owners
+    WHERE user_id = $1
+      AND is_deleted = false
+    LIMIT 1
+    `,
+    [userId]
+  );
+
+  return result.rows[0] || null;
+};
+
+const validatePaymentAccount = (body) => {
+  const {
+    payment_method,
+    wallet_provider,
+    account_name,
+    account_identifier,
+  } = body || {};
+
+  if (
+    !payment_method ||
+    typeof account_name !== "string" ||
+    typeof account_identifier !== "string"
+  ) {
+    return {
+      error:
+        "payment_method, account_name and account_identifier are required",
+    };
+  }
+
+  if (!["wallet", "instapay"].includes(payment_method)) {
+    return {
+      error: "Invalid payment method",
+    };
+  }
+
+  const allowedWalletProviders = [
+    "vodafone_cash",
+    "orange_cash",
+    "etisalat_cash",
+    "we_pay",
+    "other_wallet",
+  ];
+
+  if (
+    payment_method === "wallet" &&
+    !allowedWalletProviders.includes(wallet_provider)
+  ) {
+    return {
+      error: "A valid wallet provider is required",
+    };
+  }
+
+  if (
+    payment_method === "instapay" &&
+    wallet_provider != null
+  ) {
+    return {
+      error: "wallet_provider must be null for InstaPay",
+    };
+  }
+
+  const cleanName = account_name.trim();
+  const cleanIdentifier = account_identifier.trim();
+
+  if (!cleanName || !cleanIdentifier) {
+    return {
+      error:
+        "Account name and account identifier cannot be empty",
+    };
+  }
+
+  if (
+    payment_method === "wallet" &&
+    !/^01[0125][0-9]{8}$/.test(cleanIdentifier)
+  ) {
+    return {
+      error: "Invalid Egyptian wallet mobile number",
+    };
+  }
+
+  return {
+    data: {
+      payment_method,
+      wallet_provider:
+        payment_method === "wallet"
+          ? wallet_provider
+          : null,
+      account_name: cleanName,
+      account_identifier: cleanIdentifier,
+    },
+  };
+};
+
+const sendPaymentNotification = async ({
+  userId,
+  bookingId,
+  title,
+  message,
+}) => {
+  try {
+    await createNotification({
+      userId,
+      title,
+      message,
+      type: "payments",
+      bookingId,
+    });
+  } catch (error) {
+    console.error(
+      "PAYMENT NOTIFICATION ERROR:",
+      error
+    );
+  }
+};
 
 // ============================================================
 // ADD OWNER PAYMENT ACCOUNT
@@ -11,138 +147,27 @@ const addPaymentAccount = async (req, res) => {
   try {
     const userId = req.user.userId;
 
-    const {
-      payment_method,
-      wallet_provider,
-      account_name,
-      account_identifier,
-    } = req.body;
+    const validation = validatePaymentAccount(req.body);
 
-    // --------------------------------------------------------
-    // REQUIRED FIELDS
-    // --------------------------------------------------------
-
-    if (
-      !payment_method ||
-      !account_name ||
-      !account_identifier
-    ) {
+    if (validation.error) {
       return res.status(400).json({
         success: false,
-        message:
-          "payment_method, account_name and account_identifier are required",
+        message: validation.error,
       });
     }
 
-    // --------------------------------------------------------
-    // PAYMENT METHOD
-    // --------------------------------------------------------
+    const data = validation.data;
 
-    const allowedMethods = [
-      "wallet",
-      "instapay",
-    ];
+    const owner = await getOwnerProfile(userId);
 
-    if (!allowedMethods.includes(payment_method)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid payment method",
-      });
-    }
-
-    // --------------------------------------------------------
-    // WALLET PROVIDERS
-    // --------------------------------------------------------
-
-    const allowedWalletProviders = [
-      "vodafone_cash",
-      "orange_cash",
-      "etisalat_cash",
-      "we_pay",
-      "other_wallet",
-    ];
-
-    if (
-      payment_method === "wallet" &&
-      !allowedWalletProviders.includes(wallet_provider)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "A valid wallet provider is required",
-      });
-    }
-
-    // InstaPay must not have wallet provider
-    if (
-      payment_method === "instapay" &&
-      wallet_provider != null
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "wallet_provider must be null for InstaPay",
-      });
-    }
-
-    // --------------------------------------------------------
-    // CLEAN DATA
-    // --------------------------------------------------------
-
-    const cleanName = account_name.trim();
-    const cleanIdentifier = account_identifier.trim();
-
-    if (!cleanName || !cleanIdentifier) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Account name and account identifier cannot be empty",
-      });
-    }
-
-    // --------------------------------------------------------
-    // WALLET PHONE VALIDATION
-    // Egyptian mobile number
-    // 010 / 011 / 012 / 015
-    // --------------------------------------------------------
-
-    if (
-      payment_method === "wallet" &&
-      !/^01[0125][0-9]{8}$/.test(cleanIdentifier)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Invalid Egyptian wallet mobile number",
-      });
-    }
-
-    // --------------------------------------------------------
-    // GET OWNER
-    // --------------------------------------------------------
-
-    const ownerResult = await pool.query(
-      `
-      SELECT id
-      FROM owners
-      WHERE user_id = $1
-        AND is_deleted = false
-      LIMIT 1
-      `,
-      [userId]
-    );
-
-    if (ownerResult.rows.length === 0) {
+    if (!owner) {
       return res.status(403).json({
         success: false,
         message: "Owner profile not found",
       });
     }
 
-    const ownerId = ownerResult.rows[0].id;
-
-    // --------------------------------------------------------
-    // CHECK DUPLICATE ACTIVE ACCOUNT
-    // --------------------------------------------------------
+    const ownerId = owner.id;
 
     const existingAccount = await pool.query(
       `
@@ -157,8 +182,8 @@ const addPaymentAccount = async (req, res) => {
       `,
       [
         ownerId,
-        payment_method,
-        wallet_provider ?? null,
+        data.payment_method,
+        data.wallet_provider,
       ]
     );
 
@@ -169,10 +194,6 @@ const addPaymentAccount = async (req, res) => {
           "This payment account type is already active",
       });
     }
-
-    // --------------------------------------------------------
-    // CREATE ACCOUNT
-    // --------------------------------------------------------
 
     const result = await pool.query(
       `
@@ -197,12 +218,10 @@ const addPaymentAccount = async (req, res) => {
       `,
       [
         ownerId,
-        payment_method,
-        payment_method === "wallet"
-          ? wallet_provider
-          : null,
-        cleanName,
-        cleanIdentifier,
+        data.payment_method,
+        data.wallet_provider,
+        data.account_name,
+        data.account_identifier,
       ]
     );
 
@@ -211,11 +230,19 @@ const addPaymentAccount = async (req, res) => {
       message: "Payment account added successfully",
       account: result.rows[0],
     });
+
   } catch (error) {
     console.error(
       "ADD OWNER PAYMENT ACCOUNT ERROR:",
       error
     );
+
+    if (error.code === "23505") {
+      return res.status(409).json({
+        success: false,
+        message: "Payment account already exists",
+      });
+    }
 
     return res.status(500).json({
       success: false,
@@ -223,7 +250,6 @@ const addPaymentAccount = async (req, res) => {
     });
   }
 };
-
 
 // ============================================================
 // GET OWNER PAYMENT ACCOUNTS
@@ -264,6 +290,7 @@ const getOwnerPaymentAccounts = async (req, res) => {
       count: result.rows.length,
       accounts: result.rows,
     });
+
   } catch (error) {
     console.error(
       "GET OWNER PAYMENT ACCOUNTS ERROR:",
@@ -277,7 +304,6 @@ const getOwnerPaymentAccounts = async (req, res) => {
   }
 };
 
-
 // ============================================================
 // UPDATE OWNER PAYMENT ACCOUNT
 // PUT /api/owner/payment-accounts/:id
@@ -288,126 +314,34 @@ const updatePaymentAccount = async (req, res) => {
     const userId = req.user.userId;
     const accountId = Number(req.params.id);
 
-    const {
-      payment_method,
-      wallet_provider,
-      account_name,
-      account_identifier,
-    } = req.body;
-
-    if (
-      !Number.isInteger(accountId) ||
-      accountId <= 0
-    ) {
+    if (!isValidId(accountId)) {
       return res.status(400).json({
         success: false,
         message: "Invalid payment account id",
       });
     }
 
-    if (
-      !payment_method ||
-      !account_name ||
-      !account_identifier
-    ) {
+    const validation = validatePaymentAccount(req.body);
+
+    if (validation.error) {
       return res.status(400).json({
         success: false,
-        message:
-          "payment_method, account_name and account_identifier are required",
+        message: validation.error,
       });
     }
 
-    const allowedMethods = [
-      "wallet",
-      "instapay",
-    ];
+    const data = validation.data;
 
-    const allowedWalletProviders = [
-      "vodafone_cash",
-      "orange_cash",
-      "etisalat_cash",
-      "we_pay",
-      "other_wallet",
-    ];
+    const owner = await getOwnerProfile(userId);
 
-    if (!allowedMethods.includes(payment_method)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid payment method",
-      });
-    }
-
-    if (
-      payment_method === "wallet" &&
-      !allowedWalletProviders.includes(wallet_provider)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "A valid wallet provider is required",
-      });
-    }
-
-    if (
-      payment_method === "instapay" &&
-      wallet_provider != null
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "wallet_provider must be null for InstaPay",
-      });
-    }
-
-    const cleanName = account_name.trim();
-    const cleanIdentifier = account_identifier.trim();
-
-    if (!cleanName || !cleanIdentifier) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Account name and account identifier cannot be empty",
-      });
-    }
-
-    if (
-      payment_method === "wallet" &&
-      !/^01[0125][0-9]{8}$/.test(cleanIdentifier)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Invalid Egyptian wallet mobile number",
-      });
-    }
-
-    // --------------------------------------------------------
-    // GET OWNER
-    // --------------------------------------------------------
-
-    const ownerResult = await pool.query(
-      `
-      SELECT id
-      FROM owners
-      WHERE user_id = $1
-        AND is_deleted = false
-      LIMIT 1
-      `,
-      [userId]
-    );
-
-    if (ownerResult.rows.length === 0) {
+    if (!owner) {
       return res.status(403).json({
         success: false,
         message: "Owner profile not found",
       });
     }
 
-    const ownerId = ownerResult.rows[0].id;
-
-    // --------------------------------------------------------
-    // VERIFY ACCOUNT BELONGS TO OWNER
-    // --------------------------------------------------------
+    const ownerId = owner.id;
 
     const accountResult = await pool.query(
       `
@@ -428,10 +362,6 @@ const updatePaymentAccount = async (req, res) => {
       });
     }
 
-    // --------------------------------------------------------
-    // DUPLICATE CHECK
-    // --------------------------------------------------------
-
     const duplicateResult = await pool.query(
       `
       SELECT id
@@ -446,8 +376,8 @@ const updatePaymentAccount = async (req, res) => {
       `,
       [
         ownerId,
-        payment_method,
-        wallet_provider ?? null,
+        data.payment_method,
+        data.wallet_provider,
         accountId,
       ]
     );
@@ -459,10 +389,6 @@ const updatePaymentAccount = async (req, res) => {
           "This payment account type is already active",
       });
     }
-
-    // --------------------------------------------------------
-    // UPDATE
-    // --------------------------------------------------------
 
     const result = await pool.query(
       `
@@ -488,12 +414,10 @@ const updatePaymentAccount = async (req, res) => {
         updated_at
       `,
       [
-        payment_method,
-        payment_method === "wallet"
-          ? wallet_provider
-          : null,
-        cleanName,
-        cleanIdentifier,
+        data.payment_method,
+        data.wallet_provider,
+        data.account_name,
+        data.account_identifier,
         accountId,
         ownerId,
       ]
@@ -505,20 +429,26 @@ const updatePaymentAccount = async (req, res) => {
         "Payment account updated successfully",
       account: result.rows[0],
     });
+
   } catch (error) {
     console.error(
       "UPDATE OWNER PAYMENT ACCOUNT ERROR:",
       error
     );
 
+    if (error.code === "23505") {
+      return res.status(409).json({
+        success: false,
+        message: "Payment account already exists",
+      });
+    }
+
     return res.status(500).json({
       success: false,
-      message:
-        "Failed to update payment account",
+      message: "Failed to update payment account",
     });
   }
 };
-
 
 // ============================================================
 // DEACTIVATE OWNER PAYMENT ACCOUNT
@@ -530,10 +460,7 @@ const deactivatePaymentAccount = async (req, res) => {
     const userId = req.user.userId;
     const accountId = Number(req.params.id);
 
-    if (
-      !Number.isInteger(accountId) ||
-      accountId <= 0
-    ) {
+    if (!isValidId(accountId)) {
       return res.status(400).json({
         success: false,
         message: "Invalid payment account id",
@@ -579,6 +506,7 @@ const deactivatePaymentAccount = async (req, res) => {
         "Payment account deactivated successfully",
       account: result.rows[0],
     });
+
   } catch (error) {
     console.error(
       "DEACTIVATE OWNER PAYMENT ACCOUNT ERROR:",
@@ -587,17 +515,15 @@ const deactivatePaymentAccount = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message:
-        "Failed to deactivate payment account",
+      message: "Failed to deactivate payment account",
     });
   }
 };
 
-
-// ========================================
+// ============================================================
 // GET OWNER PAYMENTS
 // GET /api/owner/payments
-// ========================================
+// ============================================================
 
 const getOwnerPayments = async (req, res) => {
   try {
@@ -646,12 +572,13 @@ const getOwnerPayments = async (req, res) => {
         ON ps.pitch_id = p.id
 
       INNER JOIN owners o
-        ON p.owner_id = o.id
+        ON p.owner_id = o.user_id
 
       INNER JOIN users u
         ON pay.user_id = u.id
 
       WHERE o.user_id = $1
+        AND o.is_deleted = false
 
       ORDER BY pay.created_at DESC
       `,
@@ -665,7 +592,10 @@ const getOwnerPayments = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("GET OWNER PAYMENTS ERROR:", error);
+    console.error(
+      "GET OWNER PAYMENTS ERROR:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
@@ -674,38 +604,31 @@ const getOwnerPayments = async (req, res) => {
   }
 };
 
-
-// ========================================
+// ============================================================
 // APPROVE OWNER PAYMENT
 // PATCH /api/owner/payments/:id/approve
-// ========================================
-//
-// حط الثابت ده فوق في الملف (جنب require) أو سيبه فوق الدالة.
-// لو عندك قيمة تانية في الـ DB زي 'partially_paid' غيّرها هنا بس.
-const PARTIAL_PAYMENT_STATUS = "pending";
-
-// تحويل أي مبلغ لقروش (أرقام صحيحة) عشان نتفادى مشاكل الكسور العشرية
-const toCents = (value) => Math.round(Number(value) * 100);
+// ============================================================
 
 const approvePayment = async (req, res) => {
-  const client = await pool.connect();
+  let client;
 
   try {
     const userId = req.user.userId;
-    const paymentId = req.params.id;
+    const paymentId = Number(req.params.id);
+
+    if (!isValidId(paymentId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid payment id",
+      });
+    }
+
+    client = await pool.connect();
 
     await client.query("BEGIN");
 
-    // ========================================
-    // GET PAYMENT + VERIFY OWNER
-    // ========================================
-    //
-    // FOR UPDATE OF pay, b:
-    // بنقفل الدفعة والحجز بس (مش الـ owner والـ pitch)،
-    // وقفل الحجز بيضمن إن موافقتين لنفس الحجز
-    // مش هيحسبوا الـ SUM في نفس الوقت.
-    //
-    // ========================================
+    // Lock payment and booking to prevent
+    // concurrent approval of the same booking.
 
     const paymentResult = await client.query(
       `
@@ -739,10 +662,11 @@ const approvePayment = async (req, res) => {
         ON ps.pitch_id = p.id
 
       INNER JOIN owners o
-        ON p.owner_id = o.id
+        ON p.owner_id = o.user_id
 
       WHERE pay.id = $1
         AND o.user_id = $2
+        AND o.is_deleted = false
 
       FOR UPDATE OF pay, b
       `,
@@ -760,10 +684,6 @@ const approvePayment = async (req, res) => {
 
     const payment = paymentResult.rows[0];
 
-    // ========================================
-    // PAYMENT MUST BE PENDING
-    // ========================================
-
     if (payment.status !== "pending") {
       await client.query("ROLLBACK");
 
@@ -773,25 +693,18 @@ const approvePayment = async (req, res) => {
       });
     }
 
-    // ========================================
-    // TRANSACTION REFERENCE REQUIRED
-    // ========================================
-
     if (
-      !payment.transaction_reference ||
+      typeof payment.transaction_reference !== "string" ||
       !payment.transaction_reference.trim()
     ) {
       await client.query("ROLLBACK");
 
       return res.status(400).json({
         success: false,
-        message: "Transaction reference has not been submitted",
+        message:
+          "Transaction reference has not been submitted",
       });
     }
-
-    // ========================================
-    // VALIDATE PAYMENT TYPE
-    // ========================================
 
     if (
       !["deposit", "full_payment"].includes(
@@ -806,15 +719,14 @@ const approvePayment = async (req, res) => {
       });
     }
 
-    // ========================================
-    // VALIDATE AMOUNTS (كلها بالقروش)
-    // ========================================
-
     const paymentCents = toCents(payment.amount);
     const depositCents = toCents(payment.deposit_amount);
     const totalCents = toCents(payment.total_price);
 
-    if (!Number.isFinite(paymentCents) || paymentCents <= 0) {
+    if (
+      !Number.isFinite(paymentCents) ||
+      paymentCents <= 0
+    ) {
       await client.query("ROLLBACK");
 
       return res.status(400).json({
@@ -823,7 +735,10 @@ const approvePayment = async (req, res) => {
       });
     }
 
-    if (!Number.isFinite(totalCents) || totalCents <= 0) {
+    if (
+      !Number.isFinite(totalCents) ||
+      totalCents <= 0
+    ) {
       await client.query("ROLLBACK");
 
       return res.status(400).json({
@@ -832,9 +747,44 @@ const approvePayment = async (req, res) => {
       });
     }
 
-    // ========================================
+    // Get previously approved payments.
+    // This also prevents overpayment.
+
+    const paidResult = await client.query(
+      `
+      SELECT COALESCE(SUM(amount), 0) AS paid
+      FROM payments
+      WHERE booking_id = $1
+        AND status = 'paid'
+      `,
+      [payment.booking_id]
+    );
+
+    const paidCents = toCents(paidResult.rows[0].paid);
+
+    if (
+      !Number.isFinite(paidCents) ||
+      paidCents < 0 ||
+      paidCents > totalCents
+    ) {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        success: false,
+        message: "Booking payment totals are inconsistent",
+      });
+    }
+
+    let remainingAmount;
+    let updatedPayment;
+    let updatedBooking;
+    let notificationTitle;
+    let notificationMessage;
+    let successMessage;
+
+    // ========================================================
     // APPROVE DEPOSIT
-    // ========================================
+    // ========================================================
 
     if (payment.payment_type === "deposit") {
       if (
@@ -846,7 +796,8 @@ const approvePayment = async (req, res) => {
 
         return res.status(400).json({
           success: false,
-          message: "No valid deposit amount exists for this booking",
+          message:
+            "No valid deposit amount exists for this booking",
         });
       }
 
@@ -860,15 +811,26 @@ const approvePayment = async (req, res) => {
         });
       }
 
-      // ========================================
-      // APPROVE DEPOSIT PAYMENT
-      // ========================================
+      // Prevent approving a duplicate deposit.
+      if (paidCents > 0) {
+        await client.query("ROLLBACK");
 
-      const updatedPayment = await client.query(
+        return res.status(409).json({
+          success: false,
+          message:
+            "A payment has already been approved for this booking",
+        });
+      }
+
+      remainingAmount =
+        Math.max(totalCents - paymentCents, 0) / 100;
+
+      updatedPayment = await client.query(
         `
         UPDATE payments
         SET status = 'paid'
         WHERE id = $1
+          AND status = 'pending'
         RETURNING
           id,
           booking_id,
@@ -884,37 +846,16 @@ const approvePayment = async (req, res) => {
         [paymentId]
       );
 
-      // ========================================
-      // CALCULATE REMAINING AMOUNT
-      // FROM CONFIRMED PAYMENTS
-      // ========================================
+      if (updatedPayment.rows.length === 0) {
+        await client.query("ROLLBACK");
 
-      const paidResult = await client.query(
-        `
-        SELECT COALESCE(SUM(amount), 0) AS paid
-        FROM payments
-        WHERE booking_id = $1
-          AND status = 'paid'
-        `,
-        [payment.booking_id]
-      );
+        return res.status(409).json({
+          success: false,
+          message: "Payment status has changed",
+        });
+      }
 
-      const paidCents = toCents(paidResult.rows[0].paid);
-
-      const remainingAmount =
-        Math.max(totalCents - paidCents, 0) / 100;
-
-      // ========================================
-      // UPDATE BOOKING
-      // ========================================
-      //
-      // IMPORTANT:
-      // Deposit approval does NOT mean the
-      // booking is fully paid.
-      //
-      // ========================================
-
-      const updatedBooking = await client.query(
+      updatedBooking = await client.query(
         `
         UPDATE bookings
         SET
@@ -923,13 +864,12 @@ const approvePayment = async (req, res) => {
               WHEN $2::numeric <= 0 THEN 'paid'
               ELSE $3
             END,
-
-          deposit_paid_at = COALESCE(deposit_paid_at, NOW()),
-
+          deposit_paid_at = COALESCE(
+            deposit_paid_at,
+            NOW()
+          ),
           remaining_amount = $2::numeric
-
         WHERE id = $1
-
         RETURNING
           id,
           total_price,
@@ -945,84 +885,20 @@ const approvePayment = async (req, res) => {
         ]
       );
 
-      await client.query("COMMIT");
+      notificationTitle = "تم قبول دفع العربون";
+      notificationMessage =
+        "تم قبول دفع العربون الخاص بحجزك.";
 
-      // ========================================
-      // NOTIFY PLAYER
-      // ========================================
-
-      try {
-        await createNotification({
-          userId: payment.user_id,
-          title: "تم قبول دفع العربون",
-          message:
-            "تم قبول دفع العربون الخاص بحجزك.",
-          type: "payments",
-          bookingId: payment.booking_id,
-        });
-
-        console.log(
-          "✅ PAYMENT: Deposit approval notification sent to player:",
-          payment.user_id
-        );
-      } catch (notificationError) {
-        console.error(
-          "❌ PAYMENT: Failed to send deposit approval notification:",
-          notificationError.message
-        );
-      }
-
-      return res.status(200).json({
-        success: true,
-        message:
-          "Deposit payment approved successfully",
-
-        payment: updatedPayment.rows[0],
-
-        booking: updatedBooking.rows[0],
-      });
+      successMessage =
+        "Deposit payment approved successfully";
     }
 
-    // ========================================
+    // ========================================================
     // APPROVE FULL PAYMENT
-    // ========================================
+    // ========================================================
 
     if (payment.payment_type === "full_payment") {
-      // ========================================
-      // CALCULATE ACTUAL PAID AMOUNT
-      // ========================================
-      //
-      // We DO NOT trust bookings.remaining_amount
-      // here because the full-payment amount can be:
-      //
-      // Fresh booking:
-      // total_price
-      //
-      // After approved deposit:
-      // total_price - paid deposit
-      //
-      // ========================================
-
-      const paidResult = await client.query(
-        `
-        SELECT COALESCE(SUM(amount), 0) AS paid
-        FROM payments
-        WHERE booking_id = $1
-          AND status = 'paid'
-        `,
-        [payment.booking_id]
-      );
-
-      const paidCents = toCents(paidResult.rows[0].paid);
-
-      const expectedCents = Math.max(
-        totalCents - paidCents,
-        0
-      );
-
-      // ========================================
-      // NO REMAINING AMOUNT
-      // ========================================
+      const expectedCents = totalCents - paidCents;
 
       if (expectedCents <= 0) {
         await client.query("ROLLBACK");
@@ -1033,11 +909,6 @@ const approvePayment = async (req, res) => {
             "This booking has no remaining amount to pay",
         });
       }
-
-      // ========================================
-      // PAYMENT AMOUNT MUST MATCH
-      // ACTUAL OUTSTANDING AMOUNT
-      // ========================================
 
       if (paymentCents !== expectedCents) {
         await client.query("ROLLBACK");
@@ -1051,15 +922,12 @@ const approvePayment = async (req, res) => {
         });
       }
 
-      // ========================================
-      // APPROVE FULL PAYMENT
-      // ========================================
-
-      const updatedPayment = await client.query(
+      updatedPayment = await client.query(
         `
         UPDATE payments
         SET status = 'paid'
         WHERE id = $1
+          AND status = 'pending'
         RETURNING
           id,
           booking_id,
@@ -1075,25 +943,22 @@ const approvePayment = async (req, res) => {
         [paymentId]
       );
 
-      // ========================================
-      // UPDATE BOOKING
-      // ========================================
-      //
-      // deposit_paid_at مش بنلمسه هنا:
-      // لو العربون اتدفع قبل كده يفضل تاريخه زي ما هو،
-      // ولو الدفع كامل من البداية مفيش عربون أصلاً.
-      //
-      // ========================================
+      if (updatedPayment.rows.length === 0) {
+        await client.query("ROLLBACK");
 
-      const updatedBooking = await client.query(
+        return res.status(409).json({
+          success: false,
+          message: "Payment status has changed",
+        });
+      }
+
+      updatedBooking = await client.query(
         `
         UPDATE bookings
         SET
           payment_status = 'paid',
           remaining_amount = 0
-
         WHERE id = $1
-
         RETURNING
           id,
           total_price,
@@ -1105,52 +970,40 @@ const approvePayment = async (req, res) => {
         [payment.booking_id]
       );
 
-      await client.query("COMMIT");
+      notificationTitle = "تم قبول الدفع بالكامل";
+      notificationMessage =
+        "تم قبول عملية الدفع بالكامل الخاصة بحجزك.";
 
-      // ========================================
-      // NOTIFY PLAYER
-      // ========================================
-
-      try {
-        await createNotification({
-          userId: payment.user_id,
-          title: "تم قبول الدفع بالكامل",
-          message:
-            "تم قبول عملية الدفع بالكامل الخاصة بحجزك.",
-          type: "payments",
-          bookingId: payment.booking_id,
-        });
-
-        console.log(
-          "✅ PAYMENT: Full payment approval notification sent to player:",
-          payment.user_id
-        );
-      } catch (notificationError) {
-        console.error(
-          "❌ PAYMENT: Failed to send full payment approval notification:",
-          notificationError.message
-        );
-      }
-
-      return res.status(200).json({
-        success: true,
-        message:
-          "Full payment approved successfully",
-
-        payment: updatedPayment.rows[0],
-
-        booking: updatedBooking.rows[0],
-      });
+      successMessage =
+        "Full payment approved successfully";
     }
 
+    await client.query("COMMIT");
+
+    await sendPaymentNotification({
+      userId: payment.user_id,
+      bookingId: payment.booking_id,
+      title: notificationTitle,
+      message: notificationMessage,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: successMessage,
+      payment: updatedPayment.rows[0],
+      booking: updatedBooking.rows[0],
+    });
+
   } catch (error) {
-    try {
-      await client.query("ROLLBACK");
-    } catch (rollbackError) {
-      console.error(
-        "❌ PAYMENT ROLLBACK ERROR:",
-        rollbackError.message
-      );
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error(
+          "APPROVE PAYMENT ROLLBACK ERROR:",
+          rollbackError
+        );
+      }
     }
 
     console.error(
@@ -1164,28 +1017,34 @@ const approvePayment = async (req, res) => {
     });
 
   } finally {
-    client.release();
+    if (client) {
+      client.release();
+    }
   }
 };
 
-
-// ========================================
+// ============================================================
 // REJECT OWNER PAYMENT
 // PATCH /api/owner/payments/:id/reject
-// ========================================
+// ============================================================
 
 const rejectPayment = async (req, res) => {
-  const client = await pool.connect();
+  let client;
 
   try {
     const userId = req.user.userId;
-    const paymentId = req.params.id;
+    const paymentId = Number(req.params.id);
+
+    if (!isValidId(paymentId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid payment id",
+      });
+    }
+
+    client = await pool.connect();
 
     await client.query("BEGIN");
-
-    // ========================================
-    // GET PAYMENT + VERIFY OWNER
-    // ========================================
 
     const paymentResult = await client.query(
       `
@@ -1208,12 +1067,13 @@ const rejectPayment = async (req, res) => {
         ON ps.pitch_id = p.id
 
       INNER JOIN owners o
-        ON p.owner_id = o.id
+        ON p.owner_id = o.user_id
 
       WHERE pay.id = $1
         AND o.user_id = $2
+        AND o.is_deleted = false
 
-      FOR UPDATE
+      FOR UPDATE OF pay, b
       `,
       [paymentId, userId]
     );
@@ -1229,10 +1089,6 @@ const rejectPayment = async (req, res) => {
 
     const payment = paymentResult.rows[0];
 
-    // ========================================
-    // PAYMENT MUST BE PENDING
-    // ========================================
-
     if (payment.status !== "pending") {
       await client.query("ROLLBACK");
 
@@ -1241,10 +1097,6 @@ const rejectPayment = async (req, res) => {
         message: "Only pending payments can be rejected",
       });
     }
-
-    // ========================================
-    // VALIDATE PAYMENT TYPE
-    // ========================================
 
     if (
       !["deposit", "full_payment"].includes(
@@ -1259,15 +1111,12 @@ const rejectPayment = async (req, res) => {
       });
     }
 
-    // ========================================
-    // REJECT PAYMENT
-    // ========================================
-
     const updatedPayment = await client.query(
       `
       UPDATE payments
       SET status = 'failed'
       WHERE id = $1
+        AND status = 'pending'
       RETURNING
         id,
         booking_id,
@@ -1283,48 +1132,55 @@ const rejectPayment = async (req, res) => {
       [paymentId]
     );
 
+    if (updatedPayment.rows.length === 0) {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        success: false,
+        message: "Payment status has changed",
+      });
+    }
+
     await client.query("COMMIT");
 
-    try {
-      const isDeposit = payment.payment_type === "deposit";
+    const isDeposit =
+      payment.payment_type === "deposit";
 
-      await createNotification({
-        userId: updatedPayment.rows[0].user_id,
-        title: isDeposit
-          ? "تم رفض دفع العربون"
-          : "تم رفض الدفع بالكامل",
-        message: isDeposit
-          ? "تم رفض دفع العربون الخاص بحجزك."
-          : "تم رفض عملية الدفع بالكامل الخاصة بحجزك.",
-        type: "payments",
-        bookingId: payment.booking_id,
-      });
-
-      console.log(
-        "✅ PAYMENT: Rejection notification sent to player:",
-        updatedPayment.rows[0].user_id
-      );
-    } catch (notificationError) {
-      console.error(
-        "❌ PAYMENT: Failed to send rejection notification:",
-        notificationError.message
-      );
-    }
+    await sendPaymentNotification({
+      userId: updatedPayment.rows[0].user_id,
+      bookingId: payment.booking_id,
+      title: isDeposit
+        ? "تم رفض دفع العربون"
+        : "تم رفض الدفع بالكامل",
+      message: isDeposit
+        ? "تم رفض دفع العربون الخاص بحجزك."
+        : "تم رفض عملية الدفع بالكامل الخاصة بحجزك.",
+    });
 
     return res.status(200).json({
       success: true,
-      message:
-        payment.payment_type === "deposit"
-          ? "Deposit payment rejected successfully"
-          : "Full payment rejected successfully",
+      message: isDeposit
+        ? "Deposit payment rejected successfully"
+        : "Full payment rejected successfully",
       payment: updatedPayment.rows[0],
     });
 
   } catch (error) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error(
+          "REJECT PAYMENT ROLLBACK ERROR:",
+          rollbackError
+        );
+      }
+    }
 
-    await client.query("ROLLBACK");
-
-    console.error("REJECT OWNER PAYMENT ERROR:", error);
+    console.error(
+      "REJECT OWNER PAYMENT ERROR:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
@@ -1332,21 +1188,21 @@ const rejectPayment = async (req, res) => {
     });
 
   } finally {
-    client.release();
+    if (client) {
+      client.release();
+    }
   }
 };
 
-
-// ========================================
-// EXPORT
-// ========================================
+// ============================================================
+// EXPORTS
+// ============================================================
 
 module.exports = {
   addPaymentAccount,
   getOwnerPaymentAccounts,
   updatePaymentAccount,
   deactivatePaymentAccount,
-
   getOwnerPayments,
   approvePayment,
   rejectPayment,

@@ -192,49 +192,40 @@ app.use(helmet());
 // CORS
 // ========================================
 
-const allowedOrigins = (
-  process.env.ALLOWED_ORIGINS ||
-  "http://localhost:3000,http://localhost:5173"
-)
-  .split(",")
-  .map((origin) => origin.trim())
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim().replace(/\/$/, ''))
   .filter(Boolean);
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
 
-      // Allow non-browser requests
-      // such as Postman
+  // السماح بـ localhost للتطوير المحلي فقط، وليس في production
+  const isLocalhost =
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
 
-      if (!origin) {
-        return callback(null, true);
-      }
+  if (process.env.NODE_ENV !== 'production' && isLocalhost) {
+    return true;
+  }
 
-      // Allow configured origins
+  // السماح بدومينات الويب المحددة فقط
+  return allowedOrigins.includes(origin);
+}
 
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (isAllowedOrigin(origin)) {
+      return callback(null, true);
+    }
 
-      // Allow any localhost port
-      // during development
+    return callback(new Error('CORS origin not allowed'));
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+};
 
-      if (
-        process.env.NODE_ENV !== "production" &&
-        /^https?:\/\/localhost:\d+$/.test(origin)
-      ) {
-        return callback(null, true);
-      }
-
-      return callback(
-        new Error("CORS origin not allowed")
-      );
-    },
-
-    credentials: true,
-  })
-);
+app.use(cors(corsOptions));
 
 // ========================================
 // BODY PARSING
@@ -671,27 +662,15 @@ const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
   cors: {
     origin: (origin, callback) => {
-      // Allow non-browser clients
-      if (!origin) {
-        return callback(null, true);
-      }
-
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-
-      if (
-        process.env.NODE_ENV !== "production" &&
-        /^https?:\/\/localhost:\d+$/.test(origin)
-      ) {
+      if (isAllowedOrigin(origin)) {
         return callback(null, true);
       }
 
       return callback(
-        new Error("Socket.IO CORS origin not allowed")
+        new Error('Socket.IO CORS origin not allowed')
       );
     },
-
+    methods: ['GET', 'POST'],
     credentials: true,
   },
 });

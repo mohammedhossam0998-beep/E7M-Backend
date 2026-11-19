@@ -1,3 +1,4 @@
+
 const pool = require("../config/db");
 
 const {
@@ -368,19 +369,11 @@ const createBooking = async (req, res) => {
     // ========================================
 
     try {
-      const ownerUserResult = await pool.query(
-        `
-          SELECT o.user_id
-          FROM owners o
-          WHERE o.id = $1
-          LIMIT 1
-        `,
-        [slot.owner_id]
-      );
+      // pitches.owner_id already stores users.id,
+      // NOT owners.id.
+      const ownerUserId = slot.owner_id;
 
-      if (ownerUserResult.rows.length > 0) {
-        const ownerUserId = ownerUserResult.rows[0].user_id;
-
+      if (ownerUserId) {
         await createNotification({
           userId: ownerUserId,
           title: "حجز جديد 🏟️",
@@ -475,7 +468,9 @@ const getOwnerBookings = async (req, res) => {
       });
     }
 
-    const ownerId = ownerResult.rows[0].id;
+    // pitches.owner_id references users.id.
+    // Verify owner profile above,
+    // then use authenticated userId.
 
     // ========================================
     // GET OWNER BOOKINGS
@@ -533,7 +528,7 @@ const getOwnerBookings = async (req, res) => {
 
         ORDER BY b.booked_at DESC
       `,
-      [ownerId]
+      [userId]
     );
 
     // ========================================
@@ -593,7 +588,9 @@ const approveBooking = async (req, res) => {
       });
     }
 
-    const ownerId = ownerResult.rows[0].id;
+    // pitches.owner_id references users.id.
+    // Verify owner profile above,
+    // then use authenticated userId.
 
     // ========================================
     // APPROVE BOOKING
@@ -639,7 +636,7 @@ const approveBooking = async (req, res) => {
           b.updated_at,
           b.cancelled_at
       `,
-      [id, ownerId]
+      [id, userId]
     );
 
     // ========================================
@@ -653,7 +650,9 @@ const approveBooking = async (req, res) => {
       });
     }
 
-    console.log("🔔 APPROVE BOOKING: Creating notification...");
+    console.log(
+      "🔔 APPROVE BOOKING: Creating notification..."
+    );
 
     await createNotification({
       userId: result.rows[0].player_id,
@@ -723,7 +722,9 @@ const rejectBooking = async (req, res) => {
       });
     }
 
-    const ownerId = ownerResult.rows[0].id;
+    // pitches.owner_id references users.id.
+    // Verify owner profile above,
+    // then use authenticated userId.
 
     // ========================================
     // GET BOOKING + VERIFY OWNER
@@ -758,7 +759,7 @@ const rejectBooking = async (req, res) => {
         WHERE b.id = $1
           AND p.owner_id = $2
       `,
-      [id, ownerId]
+      [id, userId]
     );
 
     if (bookingResult.rows.length === 0) {
@@ -1024,14 +1025,12 @@ const cancelBooking = async (req, res) => {
     try {
       const ownerResult = await pool.query(
         `
-          SELECT o.user_id
+          SELECT p.owner_id AS user_id
           FROM bookings b
           INNER JOIN pitch_slots ps
             ON ps.id = b.pitch_slot_id
           INNER JOIN pitches p
             ON p.id = ps.pitch_id
-          INNER JOIN owners o
-            ON o.id = p.owner_id
           WHERE b.id = $1
           LIMIT 1
         `,
@@ -1202,7 +1201,7 @@ const getBookingById = async (req, res) => {
     // Can view booking belonging to his pitch
     // ========================================
 
-    if (booking.player_id !== userId) {
+    if (String(booking.player_id) !== String(userId)) {
 
       const ownerResult = await pool.query(
         `
@@ -1213,14 +1212,12 @@ const getBookingById = async (req, res) => {
         [userId]
       );
 
-      const owner_id =
-        ownerResult.rows[0]
-          ? ownerResult.rows[0].id
-          : null;
-
+      // An owner can access a booking only when
+      // the pitch belongs to their users.id,
+      // not their owners.id.
       if (
-        !owner_id ||
-        owner_id !== booking.owner_id
+        ownerResult.rows.length === 0 ||
+        String(booking.owner_id) !== String(userId)
       ) {
         return res.status(403).json({
           success: false,

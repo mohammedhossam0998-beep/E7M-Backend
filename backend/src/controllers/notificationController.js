@@ -1,13 +1,8 @@
 const pool = require("../config/db");
-
-const {
-  getMessaging,
-} = require("firebase-admin/messaging");
+const { getMessaging } = require("firebase-admin/messaging");
 
 // ============================================================
-// SEND PUSH NOTIFICATION
-// Internal function
-// Sends FCM Push to all active devices of a user
+// PUSH NOTIFICATIONS
 // ============================================================
 
 const sendPushNotification = async ({
@@ -19,31 +14,27 @@ const sendPushNotification = async ({
   teamId = null,
 }) => {
   try {
-
-    // --------------------------------------------------------
-    // CHECK USER NOTIFICATION SETTINGS
-    // --------------------------------------------------------
-
     const settingsResult = await pool.query(
       `
-        SELECT
-          booking_confirmed,
-          booking_rejected,
-          payments,
-          offers,
-          matches,
-          general
-        FROM user_notification_settings
-        WHERE user_id = $1
+      SELECT
+        new_booking,
+        booking_confirmed,
+        booking_rejected,
+        payments,
+        offers,
+        matches,
+        general
+      FROM user_notification_settings
+      WHERE user_id = $1
       `,
       [userId]
     );
 
     const settings = settingsResult.rows[0];
 
-    // If no settings exist, allow notifications by default.
     if (settings) {
       const settingByType = {
+        new_booking: settings.new_booking,
         booking_confirmed: settings.booking_confirmed,
         booking_rejected: settings.booking_rejected,
         payments: settings.payments,
@@ -54,58 +45,39 @@ const sendPushNotification = async ({
 
       const notificationType = type || "general";
 
-      const isAllowed =
+      const allowed =
         settingByType[notificationType] ?? settings.general;
 
-      if (!isAllowed) {
+      if (allowed === false) {
         console.log(
-          "🔕 [FCM] Push blocked by user settings:",
-          {
-            userId,
-            type: notificationType,
-          }
+          "[FCM] Push disabled for user:",
+          userId,
+          notificationType
         );
-
         return;
       }
     }
 
-    // --------------------------------------------------------
-    // GET ACTIVE DEVICES
-    // --------------------------------------------------------
-
     const devicesResult = await pool.query(
       `
-        SELECT
-          id,
-          fcm_token,
-          platform
-        FROM user_devices
-        WHERE user_id = $1
-          AND is_active = TRUE
-          AND fcm_token IS NOT NULL
+      SELECT id, fcm_token, platform
+      FROM user_devices
+      WHERE user_id = $1
+        AND is_active = TRUE
+        AND fcm_token IS NOT NULL
       `,
       [userId]
     );
 
-    if (devicesResult.rows.length === 0) {
-      console.log(
-        "📱 [FCM] No active devices for user:",
-        userId
-      );
-
+    if (!devicesResult.rows.length) {
       return;
     }
 
     const messaging = getMessaging();
 
-    // --------------------------------------------------------
-    // SEND TO ALL USER DEVICES
-    // --------------------------------------------------------
-
     for (const device of devicesResult.rows) {
       try {
-        const response = await messaging.send({
+        await messaging.send({
           token: device.fcm_token,
 
           notification: {
@@ -116,88 +88,65 @@ const sendPushNotification = async ({
           data: {
             type: type || "general",
             notificationType: type || "general",
-            bookingId: bookingId ? String(bookingId) : "",
-            teamId: teamId ? String(teamId) : "",
+            bookingId:
+              bookingId != null ? String(bookingId) : "",
+            teamId:
+              teamId != null ? String(teamId) : "",
           },
 
           android: {
             priority: "high",
-
             notification: {
               sound: "default",
             },
           },
         });
-
-        console.log(
-          "✅ [FCM] Push sent successfully:",
-          {
-            userId,
-            deviceId: device.id,
-            messageId: response,
-          }
-        );
       } catch (error) {
         console.error(
-          "❌ [FCM] Failed to send push:",
-          {
-            userId,
-            deviceId: device.id,
-            errorCode: error.code,
-            error: error.message,
-          }
+          "[FCM] Device send error:",
+          device.id,
+          error
         );
 
-        // ----------------------------------------------------------
-        // DEACTIVATE INVALID / EXPIRED FCM TOKEN
-        // ----------------------------------------------------------
+        const invalidToken =
+          error.code ===
+            "messaging/registration-token-not-registered" ||
+          error.code ===
+            "messaging/invalid-registration-token";
 
-        const invalidTokenErrors = [
-          "messaging/registration-token-not-registered",
-          "messaging/invalid-registration-token",
-        ];
-
-        if (invalidTokenErrors.includes(error.code)) {
+        if (invalidToken) {
           try {
             await pool.query(
               `
-                UPDATE user_devices
-                SET
-                  is_active = FALSE,
-                  updated_at = CURRENT_TIMESTAMP
-                WHERE id = $1
+              UPDATE user_devices
+              SET
+                is_active = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+              WHERE id = $1
               `,
               [device.id]
             );
-
-            console.log(
-              "🧹 [FCM] Invalid token deactivated:",
-              device.id
-            );
           } catch (cleanupError) {
             console.error(
-              "❌ [FCM] Failed to deactivate invalid token:",
-              cleanupError.message
+              "[FCM] Token cleanup error:",
+              cleanupError
             );
           }
         }
       }
     }
   } catch (error) {
+    // Push failure must not stop booking or payment.
     console.error(
-      "❌ [FCM] SEND PUSH ERROR:",
+      "[FCM] Push notification error:",
       error
     );
-
-    // IMPORTANT:
-    // Push failure must NOT break the main notification flow.
   }
 };
 
 // ============================================================
 // CREATE NOTIFICATION
-// Internal function
-// Used by other controllers such as Booking / Payment
+// Saves booking_id when provided.
 // ============================================================
 
 const createNotification = async ({
@@ -218,50 +167,36 @@ const createNotification = async ({
     );
   }
 
-  // ----------------------------------------------------------
-  // SAVE NOTIFICATION IN DATABASE FIRST
-  // ----------------------------------------------------------
-
   const result = await pool.query(
     `
-      INSERT INTO notifications (
-        user_id,
-        title,
-        message,
-        type
-      )
-      VALUES ($1, $2, $3, $4)
-      RETURNING
-        id,
-        user_id,
-        title,
-        message,
-        type,
-        is_read,
-        created_at
+    INSERT INTO notifications (
+      user_id,
+      title,
+      message,
+      type,
+      booking_id
+    )
+    VALUES ($1, $2, $3, $4, $5)
+    RETURNING
+      id,
+      user_id,
+      title,
+      message,
+      type,
+      booking_id,
+      is_read,
+      created_at
     `,
     [
       userId,
       title,
       message,
       type,
+      bookingId,
     ]
   );
 
   const notification = result.rows[0];
-
-  console.log(
-    "🔔 [NOTIFICATION] Created:",
-    {
-      notificationId: notification.id,
-      userId,
-      type,
-    }
-  );
-
-  // ----------------------------------------------------------
-  // SEND PUSH AFTER DATABASE SUCCESS
-  // ----------------------------------------------------------
 
   await sendPushNotification({
     userId,
@@ -282,33 +217,22 @@ const createNotification = async ({
 
 const getMyNotifications = async (req, res) => {
   try {
-    const userId = req.user.userId;
-
-    console.log(
-      "🔔 NOTIFICATION USER ID:",
-      userId
-    );
-
     const result = await pool.query(
       `
-        SELECT
-          id,
-          user_id,
-          title,
-          message,
-          type,
-          is_read,
-          created_at
-        FROM notifications
-        WHERE user_id = $1
-        ORDER BY created_at DESC
+      SELECT
+        id,
+        user_id,
+        title,
+        message,
+        type,
+        booking_id,
+        is_read,
+        created_at
+      FROM notifications
+      WHERE user_id = $1
+      ORDER BY created_at DESC
       `,
-      [userId]
-    );
-
-    console.log(
-      "🔔 NOTIFICATION DB ROWS:",
-      result.rows
+      [req.user.userId]
     );
 
     return res.status(200).json({
@@ -317,7 +241,7 @@ const getMyNotifications = async (req, res) => {
     });
   } catch (error) {
     console.error(
-      "❌ GET MY NOTIFICATIONS ERROR:",
+      "GET MY NOTIFICATIONS ERROR:",
       error
     );
 
@@ -335,16 +259,14 @@ const getMyNotifications = async (req, res) => {
 
 const getUnreadNotificationsCount = async (req, res) => {
   try {
-    const userId = req.user.userId;
-
     const result = await pool.query(
       `
-        SELECT COUNT(*)::int AS count
-        FROM notifications
-        WHERE user_id = $1
-          AND is_read = FALSE
+      SELECT COUNT(*)::int AS count
+      FROM notifications
+      WHERE user_id = $1
+        AND is_read = FALSE
       `,
-      [userId]
+      [req.user.userId]
     );
 
     return res.status(200).json({
@@ -353,14 +275,13 @@ const getUnreadNotificationsCount = async (req, res) => {
     });
   } catch (error) {
     console.error(
-      "❌ GET UNREAD NOTIFICATIONS COUNT ERROR:",
+      "GET UNREAD COUNT ERROR:",
       error
     );
 
     return res.status(500).json({
       success: false,
-      message:
-        "Failed to get unread notifications count",
+      message: "Failed to get unread notifications count",
     });
   }
 };
@@ -372,7 +293,6 @@ const getUnreadNotificationsCount = async (req, res) => {
 
 const markNotificationAsRead = async (req, res) => {
   try {
-    const userId = req.user.userId;
     const notificationId = req.params.id;
 
     if (!notificationId) {
@@ -384,26 +304,27 @@ const markNotificationAsRead = async (req, res) => {
 
     const result = await pool.query(
       `
-        UPDATE notifications
-        SET is_read = TRUE
-        WHERE id = $1
-          AND user_id = $2
-        RETURNING
-          id,
-          user_id,
-          title,
-          message,
-          type,
-          is_read,
-          created_at
+      UPDATE notifications
+      SET is_read = TRUE
+      WHERE id = $1
+        AND user_id = $2
+      RETURNING
+        id,
+        user_id,
+        title,
+        message,
+        type,
+        booking_id,
+        is_read,
+        created_at
       `,
       [
         notificationId,
-        userId,
+        req.user.userId,
       ]
     );
 
-    if (result.rows.length === 0) {
+    if (!result.rows.length) {
       return res.status(404).json({
         success: false,
         message: "Notification not found",
@@ -417,14 +338,13 @@ const markNotificationAsRead = async (req, res) => {
     });
   } catch (error) {
     console.error(
-      "❌ MARK NOTIFICATION AS READ ERROR:",
+      "MARK NOTIFICATION AS READ ERROR:",
       error
     );
 
     return res.status(500).json({
       success: false,
-      message:
-        "Failed to mark notification as read",
+      message: "Failed to mark notification as read",
     });
   }
 };
@@ -436,34 +356,30 @@ const markNotificationAsRead = async (req, res) => {
 
 const markAllNotificationsAsRead = async (req, res) => {
   try {
-    const userId = req.user.userId;
-
     const result = await pool.query(
       `
-        UPDATE notifications
-        SET is_read = TRUE
-        WHERE user_id = $1
-          AND is_read = FALSE
+      UPDATE notifications
+      SET is_read = TRUE
+      WHERE user_id = $1
+        AND is_read = FALSE
       `,
-      [userId]
+      [req.user.userId]
     );
 
     return res.status(200).json({
       success: true,
-      message:
-        "All notifications marked as read",
+      message: "All notifications marked as read",
       updatedCount: result.rowCount,
     });
   } catch (error) {
     console.error(
-      "❌ MARK ALL NOTIFICATIONS AS READ ERROR:",
+      "MARK ALL NOTIFICATIONS AS READ ERROR:",
       error
     );
 
     return res.status(500).json({
       success: false,
-      message:
-        "Failed to mark all notifications as read",
+      message: "Failed to mark all notifications as read",
     });
   }
 };
@@ -475,7 +391,6 @@ const markAllNotificationsAsRead = async (req, res) => {
 
 const deleteNotification = async (req, res) => {
   try {
-    const userId = req.user.userId;
     const notificationId = req.params.id;
 
     if (!notificationId) {
@@ -487,18 +402,18 @@ const deleteNotification = async (req, res) => {
 
     const result = await pool.query(
       `
-        DELETE FROM notifications
-        WHERE id = $1
-          AND user_id = $2
-        RETURNING id
+      DELETE FROM notifications
+      WHERE id = $1
+        AND user_id = $2
+      RETURNING id
       `,
       [
         notificationId,
-        userId,
+        req.user.userId,
       ]
     );
 
-    if (result.rows.length === 0) {
+    if (!result.rows.length) {
       return res.status(404).json({
         success: false,
         message: "Notification not found",
@@ -507,19 +422,17 @@ const deleteNotification = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message:
-        "Notification deleted successfully",
+      message: "Notification deleted successfully",
     });
   } catch (error) {
     console.error(
-      "❌ DELETE NOTIFICATION ERROR:",
+      "DELETE NOTIFICATION ERROR:",
       error
     );
 
     return res.status(500).json({
       success: false,
-      message:
-        "Failed to get notification",
+      message: "Failed to delete notification",
     });
   }
 };
@@ -548,35 +461,43 @@ const registerDevice = async (req, res) => {
 
     const result = await pool.query(
       `
-        INSERT INTO user_devices (
-          user_id,
-          fcm_token,
-          platform,
-          device_name,
-          is_active,
-          last_seen_at,
-          updated_at
-        )
-        VALUES ($1, $2, $3, $4, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      INSERT INTO user_devices (
+        user_id,
+        fcm_token,
+        platform,
+        device_name,
+        is_active,
+        last_seen_at,
+        updated_at
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        TRUE,
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP
+      )
 
-        ON CONFLICT (fcm_token)
-        DO UPDATE SET
-          user_id = EXCLUDED.user_id,
-          platform = EXCLUDED.platform,
-          device_name = EXCLUDED.device_name,
-          is_active = TRUE,
-          last_seen_at = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
+      ON CONFLICT (fcm_token)
+      DO UPDATE SET
+        user_id = EXCLUDED.user_id,
+        platform = EXCLUDED.platform,
+        device_name = EXCLUDED.device_name,
+        is_active = TRUE,
+        last_seen_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
 
-        RETURNING
-          id,
-          user_id,
-          platform,
-          device_name,
-          is_active,
-          last_seen_at,
-          created_at,
-          updated_at
+      RETURNING
+        id,
+        user_id,
+        platform,
+        device_name,
+        is_active,
+        last_seen_at,
+        created_at,
+        updated_at
       `,
       [
         userId,
@@ -586,24 +507,14 @@ const registerDevice = async (req, res) => {
       ]
     );
 
-    console.log(
-      "📱 FCM DEVICE REGISTERED:",
-      {
-        userId,
-        deviceId: result.rows[0].id,
-        platform,
-      }
-    );
-
     return res.status(200).json({
       success: true,
       message: "Device registered successfully",
       device: result.rows[0],
     });
-
   } catch (error) {
     console.error(
-      "❌ REGISTER FCM DEVICE ERROR:",
+      "REGISTER FCM DEVICE ERROR:",
       error
     );
 
@@ -615,68 +526,52 @@ const registerDevice = async (req, res) => {
 };
 
 // ============================================================
-// NOTIFICATION SETTINGS
-// ============================================================
-
+// GET NOTIFICATION SETTINGS
 // GET /api/notifications/settings
+// ============================================================
 
 const getNotificationSettings = async (req, res) => {
   try {
     const userId = req.user.userId;
 
-    const result = await pool.query(
+    await pool.query(
       `
-        INSERT INTO user_notification_settings (user_id)
-        VALUES ($1)
-        ON CONFLICT (user_id)
-        DO NOTHING
-        RETURNING
-          user_id,
-          booking_confirmed,
-          booking_rejected,
-          payments,
-          offers,
-          matches,
-          general,
-          created_at,
-          updated_at
+      INSERT INTO user_notification_settings (
+        user_id
+      )
+      VALUES ($1)
+      ON CONFLICT (user_id)
+      DO NOTHING
       `,
       [userId]
     );
 
-    let settings;
-
-    if (result.rows.length > 0) {
-      settings = result.rows[0];
-    } else {
-      const existing = await pool.query(
-        `
-          SELECT
-            user_id,
-            booking_confirmed,
-            booking_rejected,
-            payments,
-            offers,
-            matches,
-            general,
-            created_at,
-            updated_at
-          FROM user_notification_settings
-          WHERE user_id = $1
-        `,
-        [userId]
-      );
-
-      settings = existing.rows[0];
-    }
+    const result = await pool.query(
+      `
+      SELECT
+        user_id,
+        new_booking,
+        booking_confirmed,
+        booking_rejected,
+        payments,
+        offers,
+        matches,
+        general,
+        created_at,
+        updated_at
+      FROM user_notification_settings
+      WHERE user_id = $1
+      `,
+      [userId]
+    );
 
     return res.status(200).json({
       success: true,
-      settings,
+      settings: result.rows[0],
     });
   } catch (error) {
     console.error(
-      "❌ GET NOTIFICATION SETTINGS ERROR:",
+      "GET NOTIFICATION SETTINGS ERROR:",
       error
     );
 
@@ -687,48 +582,44 @@ const getNotificationSettings = async (req, res) => {
   }
 };
 
-
+// ============================================================
+// UPDATE NOTIFICATION SETTINGS
 // PATCH /api/notifications/settings
+// ============================================================
 
 const updateNotificationSettings = async (req, res) => {
   try {
     const userId = req.user.userId;
 
-    const {
-      booking_confirmed,
-      booking_rejected,
-      payments,
-      offers,
-      matches,
-      general,
-    } = req.body;
+    const allowedKeys = [
+      "new_booking",
+      "booking_confirmed",
+      "booking_rejected",
+      "payments",
+      "offers",
+      "matches",
+      "general",
+    ];
 
     const fields = [];
     const values = [userId];
-    let parameterIndex = 2;
 
-    const allowedFields = {
-      booking_confirmed,
-      booking_rejected,
-      payments,
-      offers,
-      matches,
-      general,
-    };
+    for (const key of allowedKeys) {
+      const value = req.body?.[key];
 
-    for (const [field, value] of Object.entries(allowedFields)) {
-      if (value !== undefined) {
-        if (typeof value !== "boolean") {
-          return res.status(400).json({
-            success: false,
-            message: `${field} must be boolean`,
-          });
-        }
-
-        fields.push(`${field} = $${parameterIndex}`);
-        values.push(value);
-        parameterIndex++;
+      if (value === undefined) {
+        continue;
       }
+
+      if (typeof value !== "boolean") {
+        return res.status(400).json({
+          success: false,
+          message: `${key} must be boolean`,
+        });
+      }
+
+      values.push(value);
+      fields.push(`${key} = $${values.length}`);
     }
 
     if (fields.length === 0) {
@@ -738,37 +629,37 @@ const updateNotificationSettings = async (req, res) => {
       });
     }
 
-    // Make sure the user has a settings row
     await pool.query(
       `
-        INSERT INTO user_notification_settings (user_id)
-        VALUES ($1)
-        ON CONFLICT (user_id)
-        DO NOTHING
+      INSERT INTO user_notification_settings (
+        user_id
+      )
+      VALUES ($1)
+      ON CONFLICT (user_id)
+      DO NOTHING
       `,
       [userId]
     );
 
-    fields.push(
-      "updated_at = CURRENT_TIMESTAMP"
-    );
-
     const result = await pool.query(
       `
-        UPDATE user_notification_settings
-        SET
-          ${fields.join(", ")}
-        WHERE user_id = $1
-        RETURNING
-          user_id,
-          booking_confirmed,
-          booking_rejected,
-          payments,
-          offers,
-          matches,
-          general,
-          created_at,
-          updated_at
+      UPDATE user_notification_settings
+      SET
+        ${fields.join(", ")},
+        updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = $1
+
+      RETURNING
+        user_id,
+        new_booking,
+        booking_confirmed,
+        booking_rejected,
+        payments,
+        offers,
+        matches,
+        general,
+        created_at,
+        updated_at
       `,
       values
     );
@@ -780,7 +671,7 @@ const updateNotificationSettings = async (req, res) => {
     });
   } catch (error) {
     console.error(
-      "❌ UPDATE NOTIFICATION SETTINGS ERROR:",
+      "UPDATE NOTIFICATION SETTINGS ERROR:",
       error
     );
 
@@ -804,7 +695,6 @@ module.exports = {
   markAllNotificationsAsRead,
   deleteNotification,
   registerDevice,
-
   getNotificationSettings,
   updateNotificationSettings,
 };

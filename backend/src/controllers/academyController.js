@@ -113,18 +113,18 @@ const createAcademy = async (req, res) => {
 
     const pitchResult = await pool.query(
       `
-      SELECT
-        id,
-        owner_id,
-        city_id,
-        name,
-        status
-      FROM pitches
-      WHERE id = $1
-        AND owner_id = $2
-      LIMIT 1
+        SELECT
+          id,
+          owner_id,
+          city_id,
+          name,
+          status
+        FROM pitches
+        WHERE id = $1
+          AND owner_id = $2
+        LIMIT 1
       `,
-      [pitch_id, ownerId]
+      [pitch_id, userId]
     );
 
     if (pitchResult.rows.length === 0) {

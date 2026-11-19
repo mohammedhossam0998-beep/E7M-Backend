@@ -1,113 +1,265 @@
+
 const pool = require("../config/db");
 
+// ============================================================
+// HELPERS
+// ============================================================
 
-// ========================================
-// GET OWNER ID
-// ========================================
+// pitches.owner_id references users.id.
+// Do not use owners.id for pitch ownership.
 
-const getOwnerId = async (userId) => {
-  const result = await pool.query(
-    `
-    SELECT id
-    FROM owners
-    WHERE user_id = $1
-    `,
-    [userId]
-  );
+const parseId = (value) => {
+  const id = Number(value);
 
-  if (result.rows.length === 0) {
+  if (!Number.isSafeInteger(id) || id <= 0) {
     return null;
   }
 
-  return result.rows[0].id;
+  return id;
 };
-
-
-// ========================================
-// SLOT TIME VALIDATION
-// ========================================
 
 const isSameTime = (startTime, endTime) => {
   if (!startTime || !endTime) {
     return false;
   }
 
-  return String(startTime).slice(0, 5) ===
-         String(endTime).slice(0, 5);
+  return (
+    String(startTime).slice(0, 5) ===
+    String(endTime).slice(0, 5)
+  );
 };
 
+const isValidTime = (value) => {
+  if (typeof value !== "string") {
+    return false;
+  }
 
-// ========================================
+  return /^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(
+    value
+  );
+};
+
+const isValidPrice = (value) => {
+  if (
+    value === null ||
+    value === undefined ||
+    String(value).trim() === ""
+  ) {
+    return false;
+  }
+
+  const price = Number(value);
+
+  return Number.isFinite(price) && price >= 0;
+};
+
+// ============================================================
+// CHECK PITCH OWNERSHIP
+// ============================================================
+
+const checkPitchOwnership = async (
+  req,
+  res,
+  pitchId
+) => {
+  const userId = parseId(req.user?.userId);
+
+  if (userId === null) {
+    res.status(401).json({
+      success: false,
+      message: "Authentication required"
+    });
+
+    return false;
+  }
+
+  const result = await pool.query(
+    `
+    SELECT id
+    FROM pitches
+    WHERE id = $1
+      AND owner_id = $2
+    LIMIT 1
+    `,
+    [pitchId, userId]
+  );
+
+  if (result.rows.length === 0) {
+    res.status(404).json({
+      success: false,
+      message:
+        "Pitch not found or does not belong to you"
+    });
+
+    return false;
+  }
+
+  return true;
+};
+
+// ============================================================
+// GET SLOT BY ID
+// ============================================================
+
+const getSlotById = async (pitchId, slotId) => {
+  const result = await pool.query(
+    `
+    SELECT
+      id,
+      pitch_id,
+      slot_date,
+      start_time,
+      end_time,
+      price,
+      status
+    FROM pitch_slots
+    WHERE id = $1
+      AND pitch_id = $2
+    `,
+    [slotId, pitchId]
+  );
+
+  return result.rows[0] || null;
+};
+
+// ============================================================
+// VALIDATE SLOT VALUES
+// ============================================================
+
+const validateSlot = ({
+  slot_date,
+  start_time,
+  end_time,
+  price
+}) => {
+  if (
+    !slot_date ||
+    !start_time ||
+    !end_time ||
+    price === undefined ||
+    price === null
+  ) {
+    return (
+      "slot_date, start_time, end_time and " +
+      "price are required"
+    );
+  }
+
+  if (
+    !isValidTime(start_time) ||
+    !isValidTime(end_time)
+  ) {
+    return "Invalid time format. Use HH:mm or HH:mm:ss";
+  }
+
+  if (isSameTime(start_time, end_time)) {
+    return "Start time and end time cannot be the same";
+  }
+
+  if (!isValidPrice(price)) {
+    return "Price must be a valid non-negative number";
+  }
+
+  return null;
+};
+
+// ============================================================
+// DATABASE ERROR HANDLER
+// ============================================================
+
+const handleSlotError = (
+  res,
+  error,
+  operation
+) => {
+  console.error(`${operation} ERROR:`, error);
+
+  if (error.code === "23505") {
+    return res.status(409).json({
+      success: false,
+      message:
+        "A slot with the same date and start time already exists"
+    });
+  }
+
+  if (error.code === "23P01") {
+    return res.status(409).json({
+      success: false,
+      message:
+        "Slot overlaps with an existing slot"
+    });
+  }
+
+  if (error.code === "23514") {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid slot values or time range"
+    });
+  }
+
+  if (
+    error.code === "22007" ||
+    error.code === "22008"
+  ) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid slot date or time"
+    });
+  }
+
+  return res.status(500).json({
+    success: false,
+    message: `Failed to ${operation.toLowerCase()}`
+  });
+};
+
+// ============================================================
 // CREATE PITCH SLOT
-// ========================================
+// ============================================================
 
 const createSlot = async (req, res) => {
   try {
+    const pitchId = parseId(req.params.id);
 
-    const { id } = req.params;
+    if (pitchId === null) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid pitch id"
+      });
+    }
 
     const {
       slot_date,
       start_time,
       end_time,
       price
-    } = req.body;
+    } = req.body || {};
 
+    // Validate input
+    const validationError = validateSlot({
+      slot_date,
+      start_time,
+      end_time,
+      price
+    });
 
-    // Check required fields
-    if (
-      !slot_date ||
-      !start_time ||
-      !end_time ||
-      price === undefined
-    ) {
+    if (validationError) {
       return res.status(400).json({
         success: false,
-        message:
-          "slot_date, start_time, end_time and price are required"
+        message: validationError
       });
     }
 
-
-    if (isSameTime(start_time, end_time)) {
-      return res.status(400).json({
-        success: false,
-        message: "Start time and end time cannot be the same"
-      });
-    }
-
-
-    // Get owner ID
-    const owner_id = await getOwnerId(req.user.userId);
-
-
-    if (!owner_id) {
-      return res.status(403).json({
-        success: false,
-        message: "Owner profile not found"
-      });
-    }
-
-
-    // Check that pitch belongs to this owner
-    const pitchResult = await pool.query(
-      `
-      SELECT id
-      FROM pitches
-      WHERE id = $1
-      AND owner_id = $2
-      `,
-      [id, owner_id]
+    // Verify pitch ownership using users.id
+    const ownsPitch = await checkPitchOwnership(
+      req,
+      res,
+      pitchId
     );
 
-
-    if (pitchResult.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Pitch not found or does not belong to you"
-      });
+    if (!ownsPitch) {
+      return;
     }
-
 
     // Create slot
     const result = await pool.query(
@@ -120,10 +272,14 @@ const createSlot = async (req, res) => {
         price
       )
       VALUES ($1, $2, $3, $4, $5)
+
       RETURNING
         id,
         pitch_id,
-        TO_CHAR(slot_date, 'YYYY-MM-DD') AS slot_date,
+        TO_CHAR(
+          slot_date,
+          'YYYY-MM-DD'
+        ) AS slot_date,
         start_time,
         end_time,
         price,
@@ -131,14 +287,13 @@ const createSlot = async (req, res) => {
         created_at
       `,
       [
-        id,
+        pitchId,
         slot_date,
         start_time,
         end_time,
-        price
+        Number(price)
       ]
     );
-
 
     return res.status(201).json({
       success: true,
@@ -146,97 +301,67 @@ const createSlot = async (req, res) => {
       slot: result.rows[0]
     });
 
-
   } catch (error) {
-
-    console.error("CREATE SLOT ERROR:", error);
-
-    // Duplicate slot
-    if (error.code === "23505") {
-      return res.status(409).json({
-        success: false,
-        message:
-          "A slot with the same date and start time already exists"
-      });
-    }
-
-    if (error.code === "23514") {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Start time and end time cannot be the same"
-      });
-    }
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to create pitch slot"
-    });
+    return handleSlotError(
+      res,
+      error,
+      "Create pitch slot"
+    );
   }
 };
 
-
-// ========================================
+// ============================================================
 // GET PITCH SLOTS
-// ========================================
+// ============================================================
 
 const getPitchSlots = async (req, res) => {
   try {
+    const pitchId = parseId(req.params.id);
 
-    const { id } = req.params;
-
-
-    // Get owner ID
-    const owner_id = await getOwnerId(req.user.userId);
-
-
-    if (!owner_id) {
-      return res.status(403).json({
+    if (pitchId === null) {
+      return res.status(400).json({
         success: false,
-        message: "Owner profile not found"
+        message: "Invalid pitch id"
       });
     }
 
-
-    // Check that pitch belongs to this owner
-    const pitchResult = await pool.query(
-      `
-      SELECT id
-      FROM pitches
-      WHERE id = $1
-      AND owner_id = $2
-      `,
-      [id, owner_id]
+    // Verify pitch ownership
+    const ownsPitch = await checkPitchOwnership(
+      req,
+      res,
+      pitchId
     );
 
-
-    if (pitchResult.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Pitch not found or does not belong to you"
-      });
+    if (!ownsPitch) {
+      return;
     }
 
-
-    // Get slots
+    // Fetch all slots for this pitch
     const result = await pool.query(
       `
       SELECT
         id,
         pitch_id,
-        TO_CHAR(slot_date, 'YYYY-MM-DD') AS slot_date,
+        TO_CHAR(
+          slot_date,
+          'YYYY-MM-DD'
+        ) AS slot_date,
         start_time,
         end_time,
         price,
         status,
         created_at
-      FROM pitch_slots
-      WHERE pitch_id = $1
-      ORDER BY slot_date ASC, start_time ASC
-      `,
-      [id]
-    );
 
+      FROM pitch_slots
+
+      WHERE pitch_id = $1
+
+      ORDER BY
+        slot_date ASC,
+        start_time ASC
+      `,
+      [pitchId]
+    );
 
     return res.status(200).json({
       success: true,
@@ -244,86 +369,57 @@ const getPitchSlots = async (req, res) => {
       slots: result.rows
     });
 
-
   } catch (error) {
-
-    console.error("GET PITCH SLOTS ERROR:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to get pitch slots"
-    });
+    return handleSlotError(
+      res,
+      error,
+      "Get pitch slots"
+    );
   }
 };
 
-
-// ========================================
+// ============================================================
 // UPDATE PITCH SLOT
-// ========================================
+// ============================================================
 
 const updateSlot = async (req, res) => {
   try {
+    const pitchId = parseId(req.params.id);
+    const slotId = parseId(req.params.slotId);
 
-    const { id, slotId } = req.params;
-
-    const {
-      slot_date,
-      start_time,
-      end_time,
-      price
-    } = req.body;
-
-
-    // Get owner ID
-    const owner_id = await getOwnerId(req.user.userId);
-
-
-    if (!owner_id) {
-      return res.status(403).json({
+    if (pitchId === null || slotId === null) {
+      return res.status(400).json({
         success: false,
-        message: "Owner profile not found"
+        message: "Invalid pitch id or slot id"
       });
     }
 
-
-    // Check slot ownership
-    const slotResult = await pool.query(
-      `
-      SELECT
-        ps.id,
-        ps.pitch_id,
-        ps.slot_date,
-        ps.start_time,
-        ps.end_time,
-        ps.price,
-        ps.status
-      FROM pitch_slots ps
-      INNER JOIN pitches p
-        ON p.id = ps.pitch_id
-      WHERE ps.id = $1
-      AND ps.pitch_id = $2
-      AND p.owner_id = $3
-      `,
-      [
-        slotId,
-        id,
-        owner_id
-      ]
+    // Verify pitch ownership
+    const ownsPitch = await checkPitchOwnership(
+      req,
+      res,
+      pitchId
     );
 
+    if (!ownsPitch) {
+      return;
+    }
 
-    if (slotResult.rows.length === 0) {
+    // Get existing slot
+    const currentSlot = await getSlotById(
+      pitchId,
+      slotId
+    );
+
+    if (!currentSlot) {
       return res.status(404).json({
         success: false,
-        message: "Slot not found or does not belong to you"
+        message:
+          "Slot not found or does not belong to you"
       });
     }
 
-
-    const currentSlot = slotResult.rows[0];
-
-
-    // Booked slots cannot be edited
+    // Prevent editing booked slots
     if (currentSlot.status === "booked") {
       return res.status(409).json({
         success: false,
@@ -331,8 +427,14 @@ const updateSlot = async (req, res) => {
       });
     }
 
+    const {
+      slot_date,
+      start_time,
+      end_time,
+      price
+    } = req.body || {};
 
-    // Keep existing values if not provided
+    // Use existing values for omitted fields
     const newSlotDate =
       slot_date ?? currentSlot.slot_date;
 
@@ -345,46 +447,45 @@ const updateSlot = async (req, res) => {
     const newPrice =
       price ?? currentSlot.price;
 
+    // Validate final values
+    const validationError = validateSlot({
+      slot_date: newSlotDate,
+      start_time: newStartTime,
+      end_time: newEndTime,
+      price: newPrice
+    });
 
-    // Validate required values
-    if (
-      !newSlotDate ||
-      !newStartTime ||
-      !newEndTime ||
-      newPrice === undefined ||
-      newPrice === null
-    ) {
+    if (validationError) {
       return res.status(400).json({
         success: false,
-        message:
-          "slot_date, start_time, end_time and price are required"
+        message: validationError
       });
     }
 
-
-    if (isSameTime(newStartTime, newEndTime)) {
-      return res.status(400).json({
-        success: false,
-        message: "Start time and end time cannot be the same"
-      });
-    }
-
-
-    // Update slot
+    // Update slot.
+    // The extra status condition protects against
+    // a booking made after the initial status check.
     const result = await pool.query(
       `
       UPDATE pitch_slots
+
       SET
         slot_date = $1,
         start_time = $2,
         end_time = $3,
         price = $4
+
       WHERE id = $5
-      AND pitch_id = $6
+        AND pitch_id = $6
+        AND status <> 'booked'
+
       RETURNING
         id,
         pitch_id,
-        TO_CHAR(slot_date, 'YYYY-MM-DD') AS slot_date,
+        TO_CHAR(
+          slot_date,
+          'YYYY-MM-DD'
+        ) AS slot_date,
         start_time,
         end_time,
         price,
@@ -395,12 +496,19 @@ const updateSlot = async (req, res) => {
         newSlotDate,
         newStartTime,
         newEndTime,
-        newPrice,
+        Number(newPrice),
         slotId,
-        id
+        pitchId
       ]
     );
 
+    if (result.rows.length === 0) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "Slot is no longer available for editing"
+      });
+    }
 
     return res.status(200).json({
       success: true,
@@ -408,95 +516,57 @@ const updateSlot = async (req, res) => {
       slot: result.rows[0]
     });
 
-
   } catch (error) {
-
-    console.error("UPDATE SLOT ERROR:", error);
-
-
-    // Duplicate slot
-    if (error.code === "23505") {
-      return res.status(409).json({
-        success: false,
-        message:
-          "A slot with the same date and start time already exists"
-      });
-    }
-
-
-    // Invalid slot time
-    if (error.code === "23514") {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Start time and end time cannot be the same"
-      });
-    }
-
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to update pitch slot"
-    });
+    return handleSlotError(
+      res,
+      error,
+      "Update pitch slot"
+    );
   }
 };
 
-
-// ========================================
+// ============================================================
 // DELETE PITCH SLOT
-// ========================================
+// ============================================================
 
 const deleteSlot = async (req, res) => {
   try {
+    const pitchId = parseId(req.params.id);
+    const slotId = parseId(req.params.slotId);
 
-    const { id, slotId } = req.params;
-
-
-    // Get owner ID
-    const owner_id = await getOwnerId(req.user.userId);
-
-
-    if (!owner_id) {
-      return res.status(403).json({
+    if (pitchId === null || slotId === null) {
+      return res.status(400).json({
         success: false,
-        message: "Owner profile not found"
+        message: "Invalid pitch id or slot id"
       });
     }
 
-
-    // Check slot ownership and status
-    const slotResult = await pool.query(
-      `
-      SELECT
-        ps.id,
-        ps.status
-      FROM pitch_slots ps
-      INNER JOIN pitches p
-        ON p.id = ps.pitch_id
-      WHERE ps.id = $1
-      AND ps.pitch_id = $2
-      AND p.owner_id = $3
-      `,
-      [
-        slotId,
-        id,
-        owner_id
-      ]
+    // Verify pitch ownership
+    const ownsPitch = await checkPitchOwnership(
+      req,
+      res,
+      pitchId
     );
 
+    if (!ownsPitch) {
+      return;
+    }
 
-    if (slotResult.rows.length === 0) {
+    // Get existing slot
+    const slot = await getSlotById(
+      pitchId,
+      slotId
+    );
+
+    if (!slot) {
       return res.status(404).json({
         success: false,
-        message: "Slot not found or does not belong to you"
+        message:
+          "Slot not found or does not belong to you"
       });
     }
 
-
-    const slot = slotResult.rows[0];
-
-
-    // Booked slots cannot be deleted
+    // Prevent deleting booked slots
     if (slot.status === "booked") {
       return res.status(409).json({
         success: false,
@@ -504,52 +574,59 @@ const deleteSlot = async (req, res) => {
       });
     }
 
-
-    // Delete slot
-    await pool.query(
+    // Delete only non-booked slot
+    const result = await pool.query(
       `
       DELETE FROM pitch_slots
       WHERE id = $1
-      AND pitch_id = $2
+        AND pitch_id = $2
+        AND status <> 'booked'
+      RETURNING id
       `,
-      [
-        slotId,
-        id
-      ]
+      [slotId, pitchId]
     );
 
+    if (result.rows.length === 0) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "Slot is no longer available for deletion"
+      });
+    }
 
     return res.status(200).json({
       success: true,
       message: "Pitch slot deleted successfully"
     });
 
-
   } catch (error) {
-
-    console.error("DELETE SLOT ERROR:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to delete pitch slot"
-    });
+    return handleSlotError(
+      res,
+      error,
+      "Delete pitch slot"
+    );
   }
 };
 
-
-// ========================================
+// ============================================================
 // UPDATE SLOT STATUS
-// ========================================
+// ============================================================
 
 const updateSlotStatus = async (req, res) => {
   try {
+    const pitchId = parseId(req.params.id);
+    const slotId = parseId(req.params.slotId);
 
-    const { id, slotId } = req.params;
+    if (pitchId === null || slotId === null) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid pitch id or slot id"
+      });
+    }
 
-    const { status } = req.body;
+    const { status } = req.body || {};
 
-
-    // Only these status changes are allowed manually
+    // Only available / blocked are allowed manually
     if (
       status !== "available" &&
       status !== "blocked"
@@ -561,71 +638,57 @@ const updateSlotStatus = async (req, res) => {
       });
     }
 
-
-    // Get owner ID
-    const owner_id = await getOwnerId(req.user.userId);
-
-
-    if (!owner_id) {
-      return res.status(403).json({
-        success: false,
-        message: "Owner profile not found"
-      });
-    }
-
-
-    // Check slot ownership
-    const slotResult = await pool.query(
-      `
-      SELECT
-        ps.id,
-        ps.status
-      FROM pitch_slots ps
-      INNER JOIN pitches p
-        ON p.id = ps.pitch_id
-      WHERE ps.id = $1
-      AND ps.pitch_id = $2
-      AND p.owner_id = $3
-      `,
-      [
-        slotId,
-        id,
-        owner_id
-      ]
+    // Verify pitch ownership
+    const ownsPitch = await checkPitchOwnership(
+      req,
+      res,
+      pitchId
     );
 
+    if (!ownsPitch) {
+      return;
+    }
 
-    if (slotResult.rows.length === 0) {
+    // Get existing slot
+    const currentSlot = await getSlotById(
+      pitchId,
+      slotId
+    );
+
+    if (!currentSlot) {
       return res.status(404).json({
         success: false,
-        message: "Slot not found or does not belong to you"
+        message:
+          "Slot not found or does not belong to you"
       });
     }
 
-
-    const currentStatus = slotResult.rows[0].status;
-
-
-    // Booked slots cannot be manually changed
-    if (currentStatus === "booked") {
+    // Booked slots cannot change manually
+    if (currentSlot.status === "booked") {
       return res.status(409).json({
         success: false,
-        message: "Booked slot status cannot be changed manually"
+        message:
+          "Booked slot status cannot be changed manually"
       });
     }
 
-
-    // Update status
+    // Update status with a second booked check
     const result = await pool.query(
       `
       UPDATE pitch_slots
       SET status = $1
+
       WHERE id = $2
-      AND pitch_id = $3
+        AND pitch_id = $3
+        AND status <> 'booked'
+
       RETURNING
         id,
         pitch_id,
-        TO_CHAR(slot_date, 'YYYY-MM-DD') AS slot_date,
+        TO_CHAR(
+          slot_date,
+          'YYYY-MM-DD'
+        ) AS slot_date,
         start_time,
         end_time,
         price,
@@ -635,10 +698,17 @@ const updateSlotStatus = async (req, res) => {
       [
         status,
         slotId,
-        id
+        pitchId
       ]
     );
 
+    if (result.rows.length === 0) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "Slot status changed. Refresh and try again"
+      });
+    }
 
     return res.status(200).json({
       success: true,
@@ -646,22 +716,18 @@ const updateSlotStatus = async (req, res) => {
       slot: result.rows[0]
     });
 
-
   } catch (error) {
-
-    console.error("UPDATE SLOT STATUS ERROR:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to update slot status"
-    });
+    return handleSlotError(
+      res,
+      error,
+      "Update slot status"
+    );
   }
 };
 
-
-// ========================================
-// EXPORT
-// ========================================
+// ============================================================
+// EXPORTS
+// ============================================================
 
 module.exports = {
   createSlot,

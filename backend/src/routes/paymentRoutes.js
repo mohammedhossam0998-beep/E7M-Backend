@@ -1,8 +1,13 @@
+
 const express = require("express");
 
 const {
-  authenticateToken
+  authenticateToken,
 } = require("../middleware/authMiddleware");
+
+const {
+  authorizeRoles,
+} = require("../middleware/roleMiddleware");
 
 const {
   createPayment,
@@ -11,76 +16,115 @@ const {
   getBookingPaymentAccounts,
 } = require("../controllers/paymentController");
 
+const {
+  getAcademyPaymentAccounts,
+  createAcademyPayment,
+  getPlayerAcademyPayments,
+  submitAcademyTransactionReference,
+  getOwnerAcademyPayments,
+  approveAcademyPayment,
+  rejectAcademyPayment,
+} = require("../controllers/academyPaymentController");
+
 const router = express.Router();
 
 // ============================================================
-// GET BOOKING PAYMENT ACCOUNTS
-// GET /api/payments/booking/:bookingId/accounts
-// ============================================================
-//
-// Returns the owner's active payment accounts for the
-// pitch of this booking, so the player can choose one.
-//
-// Kept BEFORE "/booking/:bookingId" for clarity.
-//
+// ACADEMY PAYMENTS
 // ============================================================
 
+// Player: Get academy payment accounts.
+router.get(
+  "/academy/enrollments/:enrollmentId/accounts",
+  authenticateToken,
+  authorizeRoles("player"),
+  getAcademyPaymentAccounts
+);
+
+// Player: Get enrollment payments.
+router.get(
+  "/academy/enrollments/:enrollmentId",
+  authenticateToken,
+  authorizeRoles("player"),
+  getPlayerAcademyPayments
+);
+
+// Player: Create enrollment payment.
+router.post(
+  "/academy/enrollments/:enrollmentId",
+  authenticateToken,
+  authorizeRoles("player"),
+  createAcademyPayment
+);
+
+// Player: Submit transfer reference.
+router.post(
+  "/academy/:paymentId/submit",
+  authenticateToken,
+  authorizeRoles("player"),
+  submitAcademyTransactionReference
+);
+
+// Owner: Get academy payments.
+router.get(
+  "/academy/owner",
+  authenticateToken,
+  authorizeRoles("owner"),
+  getOwnerAcademyPayments
+);
+
+// Owner: Approve academy payment.
+router.patch(
+  "/academy/:paymentId/approve",
+  authenticateToken,
+  authorizeRoles("owner"),
+  approveAcademyPayment
+);
+
+// Owner: Reject academy payment.
+router.patch(
+  "/academy/:paymentId/reject",
+  authenticateToken,
+  authorizeRoles("owner"),
+  rejectAcademyPayment
+);
+
+// ============================================================
+// STADIUM BOOKING PAYMENTS - UNCHANGED
+// ============================================================
+
+// Get booking payment accounts.
 router.get(
   "/booking/:bookingId/accounts",
   authenticateToken,
   getBookingPaymentAccounts
 );
 
-// ========================================
-// GET BOOKING PAYMENTS
-// ========================================
-
-// Get all payments for a specific booking
+// Get booking payments.
 router.get(
   "/booking/:bookingId",
   authenticateToken,
   getBookingPayments
 );
 
-// ========================================
-// PLAYER PAYMENTS
-// ========================================
-
-// Create deposit payment
-// The amount is taken automatically from
-// booking.deposit_amount
+// Create deposit payment.
 router.post(
   "/deposit",
   authenticateToken,
   createPayment
 );
 
-
-// ========================================
-// PLAYER FULL PAYMENT
-// ========================================
-
-// Create full payment
-// The amount is taken automatically from
-// booking.total_price
+// Create full payment.
 router.post(
   "/full",
   authenticateToken,
   createPayment
 );
 
-
-// ========================================
-// SUBMIT TRANSACTION REFERENCE
-// ========================================
-
-// Player submits the transaction reference
-// after making the transfer
+// Submit stadium payment transfer reference.
 router.post(
   "/:id/submit",
   authenticateToken,
   submitTransactionReference
 );
-
 
 module.exports = router;

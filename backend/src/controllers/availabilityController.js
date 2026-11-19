@@ -1,42 +1,61 @@
+
 const pool = require("../config/db");
 
 // ============================================================
-// GET OWNER ID
+// GET AUTHENTICATED USER ID
+// ============================================================
+// IMPORTANT:
+// pitches.owner_id references users.id,
+// NOT owners.id.
+//
+// Therefore, pitch ownership must be checked using
+// req.user.userId directly.
 // ============================================================
 
-const getOwnerId = async (userId) => {
-  const result = await pool.query(
-    `
-    SELECT id
-    FROM owners
-    WHERE user_id = $1
-    `,
-    [userId]
-  );
+const getAuthenticatedUserId = (req) => {
+  const userId = Number(req.user?.userId);
 
-  if (result.rows.length === 0) {
+  if (!Number.isSafeInteger(userId) || userId <= 0) {
     return null;
   }
 
-  return result.rows[0].id;
+  return userId;
 };
 
 // ============================================================
 // CHECK PITCH OWNERSHIP
 // ============================================================
 
-const checkPitchOwnership = async (pitchId, ownerId) => {
+const checkPitchOwnership = async (pitchId, userId) => {
   const result = await pool.query(
     `
     SELECT id
     FROM pitches
     WHERE id = $1
       AND owner_id = $2
+    LIMIT 1
     `,
-    [pitchId, ownerId]
+    [pitchId, userId]
   );
 
   return result.rows.length > 0;
+};
+
+// ============================================================
+// VALIDATE PITCH ID
+// ============================================================
+
+const getValidPitchId = (rawId) => {
+  const pitchId = Number(rawId);
+
+  if (
+    !Number.isSafeInteger(pitchId) ||
+    pitchId <= 0
+  ) {
+    return null;
+  }
+
+  return pitchId;
 };
 
 // ============================================================
@@ -45,35 +64,52 @@ const checkPitchOwnership = async (pitchId, ownerId) => {
 
 const getAvailabilitySettings = async (req, res) => {
   try {
-    const pitchId = Number(req.params.id);
+    // --------------------------------------------------------
+    // VALIDATE PITCH ID
+    // --------------------------------------------------------
 
-    if (!Number.isInteger(pitchId)) {
+    const pitchId = getValidPitchId(req.params.id);
+
+    if (pitchId === null) {
       return res.status(400).json({
         success: false,
         message: "Invalid pitch id",
       });
     }
 
-    const ownerId = await getOwnerId(req.user.userId);
+    // --------------------------------------------------------
+    // GET AUTHENTICATED USER
+    // --------------------------------------------------------
 
-    if (!ownerId) {
-      return res.status(403).json({
+    const userId = getAuthenticatedUserId(req);
+
+    if (userId === null) {
+      return res.status(401).json({
         success: false,
-        message: "Owner profile not found",
+        message: "Authentication required",
       });
     }
 
+    // --------------------------------------------------------
+    // CHECK PITCH OWNERSHIP
+    // --------------------------------------------------------
+
     const ownsPitch = await checkPitchOwnership(
       pitchId,
-      ownerId
+      userId
     );
 
     if (!ownsPitch) {
       return res.status(404).json({
         success: false,
-        message: "Pitch not found or does not belong to you",
+        message:
+          "Pitch not found or does not belong to you",
       });
     }
+
+    // --------------------------------------------------------
+    // GET SAVED SETTINGS
+    // --------------------------------------------------------
 
     const result = await pool.query(
       `
@@ -93,9 +129,9 @@ const getAvailabilitySettings = async (req, res) => {
       [pitchId]
     );
 
-    // ========================================================
+    // --------------------------------------------------------
     // NO SETTINGS SAVED YET
-    // ========================================================
+    // --------------------------------------------------------
 
     if (result.rows.length === 0) {
       return res.status(200).json({
@@ -112,11 +148,16 @@ const getAvailabilitySettings = async (req, res) => {
       });
     }
 
+    // --------------------------------------------------------
+    // RETURN EXISTING SETTINGS
+    // --------------------------------------------------------
+
     return res.status(200).json({
       success: true,
       exists: true,
       settings: result.rows[0],
     });
+
   } catch (error) {
     console.error(
       "GET AVAILABILITY SETTINGS ERROR:",
@@ -125,7 +166,8 @@ const getAvailabilitySettings = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "Failed to get availability settings",
+      message:
+        "Failed to get availability settings",
     });
   }
 };
@@ -136,14 +178,52 @@ const getAvailabilitySettings = async (req, res) => {
 
 const saveAvailabilitySettings = async (req, res) => {
   try {
-    const pitchId = Number(req.params.id);
+    // --------------------------------------------------------
+    // VALIDATE PITCH ID
+    // --------------------------------------------------------
 
-    if (!Number.isInteger(pitchId)) {
+    const pitchId = getValidPitchId(req.params.id);
+
+    if (pitchId === null) {
       return res.status(400).json({
         success: false,
         message: "Invalid pitch id",
       });
     }
+
+    // --------------------------------------------------------
+    // GET AUTHENTICATED USER
+    // --------------------------------------------------------
+
+    const userId = getAuthenticatedUserId(req);
+
+    if (userId === null) {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+    }
+
+    // --------------------------------------------------------
+    // CHECK PITCH OWNERSHIP
+    // --------------------------------------------------------
+
+    const ownsPitch = await checkPitchOwnership(
+      pitchId,
+      userId
+    );
+
+    if (!ownsPitch) {
+      return res.status(404).json({
+        success: false,
+        message:
+          "Pitch not found or does not belong to you",
+      });
+    }
+
+    // --------------------------------------------------------
+    // GET REQUEST BODY
+    // --------------------------------------------------------
 
     const {
       weekly_days,
@@ -153,9 +233,9 @@ const saveAvailabilitySettings = async (req, res) => {
       default_price,
     } = req.body;
 
-    // ========================================================
-    // VALIDATE DAYS
-    // ========================================================
+    // --------------------------------------------------------
+    // VALIDATE WORKING DAYS
+    // --------------------------------------------------------
 
     if (!Array.isArray(weekly_days)) {
       return res.status(400).json({
@@ -167,7 +247,8 @@ const saveAvailabilitySettings = async (req, res) => {
     if (weekly_days.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "At least one working day is required",
+        message:
+          "At least one working day is required",
       });
     }
 
@@ -182,82 +263,98 @@ const saveAvailabilitySettings = async (req, res) => {
     if (invalidDay) {
       return res.status(400).json({
         success: false,
-        message: "weekly_days must contain values from 1 to 7",
+        message:
+          "weekly_days must contain values from 1 to 7",
       });
     }
 
-    // Remove duplicates
+    // Remove duplicate days
     const uniqueDays = [...new Set(normalizedDays)];
 
-    // ========================================================
-    // VALIDATE DURATION
-    // ========================================================
+    // --------------------------------------------------------
+    // VALIDATE SLOT DURATION
+    // --------------------------------------------------------
 
     const duration = Number(slot_duration);
 
     if (![60, 90, 120].includes(duration)) {
       return res.status(400).json({
         success: false,
-        message: "slot_duration must be 60, 90 or 120",
+        message:
+          "slot_duration must be 60, 90 or 120",
       });
     }
 
-    // ========================================================
-    // VALIDATE PRICE
-    // ========================================================
+    // --------------------------------------------------------
+    // VALIDATE DEFAULT PRICE
+    // --------------------------------------------------------
+
+    if (
+      default_price === null ||
+      default_price === undefined ||
+      String(default_price).trim() === ""
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "default_price is required",
+      });
+    }
 
     const price = Number(default_price);
 
-    if (!Number.isFinite(price) || price < 0) {
+    if (
+      !Number.isFinite(price) ||
+      price < 0
+    ) {
       return res.status(400).json({
         success: false,
-        message: "default_price must be a valid positive number",
+        message:
+          "default_price must be a valid non-negative number",
       });
     }
 
-    // ========================================================
+    // --------------------------------------------------------
     // VALIDATE TIME
-    // ========================================================
+    // --------------------------------------------------------
 
     if (!start_time || !end_time) {
       return res.status(400).json({
         success: false,
-        message: "start_time and end_time are required",
+        message:
+          "start_time and end_time are required",
       });
     }
 
-    // ========================================================
-    // GET OWNER
-    // ========================================================
+    const timeRegex =
+      /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/;
 
-    const ownerId = await getOwnerId(req.user.userId);
-
-    if (!ownerId) {
-      return res.status(403).json({
+    if (
+      typeof start_time !== "string" ||
+      typeof end_time !== "string" ||
+      !timeRegex.test(start_time) ||
+      !timeRegex.test(end_time)
+    ) {
+      return res.status(400).json({
         success: false,
-        message: "Owner profile not found",
+        message:
+          "Invalid time format. Use HH:mm or HH:mm:ss",
       });
     }
 
-    // ========================================================
-    // CHECK PITCH
-    // ========================================================
+    // A complete working day must still be represented
+    // by different start and end times.
 
-    const ownsPitch = await checkPitchOwnership(
-      pitchId,
-      ownerId
-    );
-
-    if (!ownsPitch) {
-      return res.status(404).json({
+    if (start_time.slice(0, 5) === end_time.slice(0, 5)) {
+      return res.status(400).json({
         success: false,
-        message: "Pitch not found or does not belong to you",
+        message:
+          "Start time and end time cannot be the same",
       });
     }
 
-    // ========================================================
-    // INSERT OR UPDATE
-    // ========================================================
+    // --------------------------------------------------------
+    // INSERT OR UPDATE AVAILABILITY SETTINGS
+    // --------------------------------------------------------
 
     const result = await pool.query(
       `
@@ -311,11 +408,17 @@ const saveAvailabilitySettings = async (req, res) => {
       ]
     );
 
+    // --------------------------------------------------------
+    // SUCCESS RESPONSE
+    // --------------------------------------------------------
+
     return res.status(200).json({
       success: true,
-      message: "Availability settings saved successfully",
+      message:
+        "Availability settings saved successfully",
       settings: result.rows[0],
     });
+
   } catch (error) {
     console.error(
       "SAVE AVAILABILITY SETTINGS ERROR:",
@@ -324,7 +427,8 @@ const saveAvailabilitySettings = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "Failed to save availability settings",
+      message:
+        "Failed to save availability settings",
     });
   }
 };

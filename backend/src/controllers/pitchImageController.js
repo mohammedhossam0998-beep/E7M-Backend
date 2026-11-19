@@ -1,3 +1,4 @@
+
 const pool = require("../config/db");
 const fs = require("fs");
 const path = require("path");
@@ -9,7 +10,7 @@ const path = require("path");
 const getOwnerId = async (userId) => {
   const result = await pool.query(
     `
-    SELECT id
+    SELECT user_id
     FROM owners
     WHERE user_id = $1
     `,
@@ -20,7 +21,7 @@ const getOwnerId = async (userId) => {
     return null;
   }
 
-  return result.rows[0].id;
+  return result.rows[0].user_id;
 };
 
 // ========================================

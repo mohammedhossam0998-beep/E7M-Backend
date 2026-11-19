@@ -3563,11 +3563,10 @@ const deleteOwner = async (req, res) => {
 // GET ALL PITCHES
 // ========================================
 
+
 const getAllPitches = async (req, res) => {
   try {
-
-    const result = await pool.query(
-      `
+    const result = await pool.query(`
       SELECT
         p.id,
         p.owner_id,
@@ -3587,32 +3586,28 @@ const getAllPitches = async (req, res) => {
         p.created_at,
         p.updated_at
       FROM pitches p
-      INNER JOIN owners o
-        ON o.id = p.owner_id
-      INNER JOIN users u
-        ON u.id = o.user_id
+      LEFT JOIN users u
+        ON u.id = p.owner_id
       LEFT JOIN cities c
         ON c.id = p.city_id
       ORDER BY p.created_at DESC
-      `
-    );
+    `);
 
     return res.status(200).json({
       success: true,
       count: result.rows.length,
-      pitches: result.rows
+      pitches: result.rows,
     });
-
   } catch (error) {
-
     console.error("GET ALL PITCHES ERROR:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Failed to get pitches"
+      message: "Failed to get pitches",
     });
   }
 };
+
 // ========================================
 // CREATE PITCH
 // ========================================
