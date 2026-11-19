@@ -1,4 +1,3 @@
-
 const pool = require("../config/db");
 
 const {
@@ -123,6 +122,9 @@ const createBooking = async (req, res) => {
     // ========================================
     // GET SLOT + PITCH + OWNER DEPOSIT
     // FOR UPDATE PREVENTS DOUBLE BOOKING
+    //
+    // Use pitches.base_price as the booking price
+    // so the displayed price and charged price match.
     // ========================================
 
     const slotResult = await client.query(
@@ -130,7 +132,7 @@ const createBooking = async (req, res) => {
         SELECT
           ps.id,
           ps.pitch_id,
-          ps.price,
+          p.base_price AS price,
           ps.status,
 
           p.owner_id,

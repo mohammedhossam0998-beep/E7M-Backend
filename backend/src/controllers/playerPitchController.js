@@ -165,26 +165,31 @@ const getPlayerPitchSlots = async (req, res) => {
     }
 
     // ----------------------------------------
-    // Get only available slots
+    // Get only available slots.
+    // The displayed price comes from the owner's
+    // pitch price, not an old saved slot price.
     // ----------------------------------------
 
     const result = await pool.query(
       `
       SELECT
-        id,
-        pitch_id,
-        slot_date,
-        start_time,
-        end_time,
-        price,
-        status,
-        created_at
-      FROM pitch_slots
-      WHERE pitch_id = $1
-        AND status = 'available'
+        ps.id,
+        ps.pitch_id,
+        ps.slot_date,
+        ps.start_time,
+        ps.end_time,
+        p.base_price AS price,
+        ps.status,
+        ps.created_at
+      FROM pitch_slots ps
+      INNER JOIN pitches p
+        ON p.id = ps.pitch_id
+      WHERE ps.pitch_id = $1
+        AND p.status = 'approved'
+        AND ps.status = 'available'
       ORDER BY
-        slot_date ASC,
-        start_time ASC
+        ps.slot_date ASC,
+        ps.start_time ASC
       `,
       [id]
     );
@@ -203,6 +208,7 @@ const getPlayerPitchSlots = async (req, res) => {
     });
   }
 };
+
 // ========================================
 // GET PITCH IMAGES
 // GET /api/pitches/:id/images
@@ -269,6 +275,7 @@ const getPitchImages = async (req, res) => {
     });
   }
 };
+
 // ========================================
 // EXPORT
 // ========================================
