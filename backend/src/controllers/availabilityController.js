@@ -1,4 +1,3 @@
-
 const pool = require("../config/db");
 
 // ============================================================
@@ -131,9 +130,29 @@ const getAvailabilitySettings = async (req, res) => {
 
     // --------------------------------------------------------
     // NO SETTINGS SAVED YET
+    // Use the pitch's configured base price instead of a
+    // hard-coded price so newly generated slots match the
+    // owner's stadium price by default.
     // --------------------------------------------------------
 
     if (result.rows.length === 0) {
+      const pitchResult = await pool.query(
+        `
+        SELECT base_price
+        FROM pitches
+        WHERE id = $1
+        LIMIT 1
+        `,
+        [pitchId]
+      );
+
+      if (pitchResult.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Pitch not found",
+        });
+      }
+
       return res.status(200).json({
         success: true,
         exists: false,
@@ -143,7 +162,9 @@ const getAvailabilitySettings = async (req, res) => {
           start_time: "12:00:00",
           end_time: "00:00:00",
           slot_duration: 90,
-          default_price: "300.00",
+          default_price: Number(
+            pitchResult.rows[0].base_price
+          ).toFixed(2),
         },
       });
     }
