@@ -2131,125 +2131,195 @@ const unverifyUser = async (req, res) => {
 // ========================================
 
 const deleteUser = async (req, res) => {
+  const id = String(req.params.id ?? "").trim();
+
+  if (!/^[1-9]\d*$/.test(id)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid user ID"
+    });
+  }
+
+  if (id === String(req.user.userId)) {
+    return res.status(400).json({
+      success: false,
+      message: "You cannot delete your own account"
+    });
+  }
+
+  // Identifiers below come from PostgreSQL catalog metadata only.
+  const quoteIdent = (value) => `"${String(value).replace(/"/g, '""')}"`;
   const client = await pool.connect();
+  let inTransaction = false;
 
   try {
+    await client.query("BEGIN");
+    inTransaction = true;
 
-    const { id } = req.params;
+    const userResult = await client.query(
+      "SELECT id, full_name, email, role FROM public.users WHERE id = $1 FOR UPDATE",
+      [id]
+    );
 
-    // Prevent admin from deleting himself
-    if (String(id) === String(req.user.userId)) {
-      client.release();
-
-      return res.status(400).json({
-        success: false,
-        message: "You cannot delete your own account"
-      });
+    if (userResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      inTransaction = false;
+      return res.status(404).json({ success: false, message: "User not found" });
     }
 
-    await client.query("BEGIN");
+    // Owner profiles are safe to remove only if nothing else uses their IDs.
+    const ownerResult = await client.query(
+      "SELECT id FROM public.owners WHERE user_id = $1 FOR UPDATE",
+      [id]
+    );
+    const ownerIds = ownerResult.rows.map((row) => row.id);
 
-    // ========================================
-    // CHECK RELATED DATA ACROSS TABLES
-    // ========================================
+    const denyDelete = async (reason) => {
+      await client.query("ROLLBACK");
+      inTransaction = false;
+      return res.status(409).json({
+        success: false,
+        message: "User cannot be deleted because related data exists",
+        reason
+      });
+    };
 
-    const checks = [
-      { table: "coaches", column: "user_id", message: "User has a coach profile" },
-      { table: "owners", column: "user_id", message: "User has an owner profile" },
-      { table: "bookings", column: "player_id", message: "User has bookings" },
-      { table: "reviews", column: "player_id", message: "User has reviews" },
-      { table: "reports", column: "reporter_id", message: "User has submitted reports" },
-      { table: "payments", column: "user_id", message: "User has payments" },
-      { table: "academy_enrollment", column: "player_id", message: "User has academy enrollments" }
+    // Keep the original checks for business records even if no FK was set up.
+    const importantLinks = [
+      ["coaches", "user_id"],
+      ["bookings", "player_id"],
+      ["reviews", "player_id"],
+      ["reports", "reporter_id"],
+      ["payments", "user_id"],
+      ["academy_enrollment", "player_id"]
     ];
 
-    for (const check of checks) {
-
+    for (const [table, column] of importantLinks) {
       const result = await client.query(
-        `
-        SELECT 1
-        FROM ${check.table}
-        WHERE ${check.column} = $1
-        LIMIT 1
-        `,
+        `SELECT 1 FROM public.${quoteIdent(table)} WHERE ${quoteIdent(column)} = $1 LIMIT 1`,
         [id]
       );
+      if (result.rowCount > 0) return await denyDelete(`Related records in ${table}`);
+    }
 
-      if (result.rows.length > 0) {
-        await client.query("ROLLBACK");
+    // Inspect actual database foreign keys so financial or operational data
+    // cannot be erased accidentally by ON DELETE CASCADE rules.
+    const referencedBy = async (parentTable) => {
+      const fk = await client.query(`
+        SELECT child_ns.nspname AS schema_name,
+               child.relname AS table_name,
+               child_col.attname AS column_name
+        FROM pg_constraint c
+        JOIN pg_class parent ON parent.oid = c.confrelid
+        JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+        JOIN pg_class child ON child.oid = c.conrelid
+        JOIN pg_namespace child_ns ON child_ns.oid = child.relnamespace
+        JOIN pg_attribute child_col
+          ON child_col.attrelid = child.oid AND child_col.attnum = c.conkey[1]
+        JOIN pg_attribute parent_col
+          ON parent_col.attrelid = parent.oid AND parent_col.attnum = c.confkey[1]
+        WHERE c.contype = 'f'
+          AND parent_ns.nspname = 'public'
+          AND parent.relname = $1
+          AND parent_col.attname = 'id'
+          AND array_length(c.conkey, 1) = 1
+          AND array_length(c.confkey, 1) = 1
+      `, [parentTable]);
+      return fk.rows;
+    };
 
-        return res.status(409).json({
-          success: false,
-          message: "User cannot be deleted because related data exists",
-          reason: check.message
-        });
+    const allowedUserChildren = new Set([
+      "public.owners.user_id",
+      "public.refresh_tokens.user_id",
+      "public.user_sessions.user_id",
+      "public.notifications.user_id"
+    ]);
+
+    for (const link of await referencedBy("users")) {
+      const key = `${link.schema_name}.${link.table_name}.${link.column_name}`;
+      if (allowedUserChildren.has(key)) continue;
+      const found = await client.query(
+        `SELECT 1 FROM ${quoteIdent(link.schema_name)}.${quoteIdent(link.table_name)} ` +
+        `WHERE ${quoteIdent(link.column_name)} = $1 LIMIT 1`,
+        [id]
+      );
+      if (found.rowCount > 0) return await denyDelete(`Related records in ${link.table_name}`);
+    }
+
+    if (ownerIds.length > 0) {
+      // Inspect FK references to owners; also find legacy owner_id columns
+      // that might not have declared foreign key constraints.
+      const candidates = new Map();
+      for (const link of await referencedBy("owners")) {
+        const key = `${link.schema_name}.${link.table_name}.${link.column_name}`;
+        candidates.set(key, link);
+      }
+      const legacyLinks = await client.query(`
+        SELECT table_schema AS schema_name,
+               table_name,
+               column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND column_name = 'owner_id'
+          AND table_name <> 'owners'
+      `);
+      for (const link of legacyLinks.rows) {
+        const key = `${link.schema_name}.${link.table_name}.${link.column_name}`;
+        candidates.set(key, link);
+      }
+
+      for (const link of candidates.values()) {
+        for (const ownerId of ownerIds) {
+          const found = await client.query(
+            `SELECT 1 FROM ${quoteIdent(link.schema_name)}.${quoteIdent(link.table_name)} ` +
+            `WHERE ${quoteIdent(link.column_name)} = $1 LIMIT 1`,
+            [ownerId]
+          );
+          if (found.rowCount > 0) {
+            return await denyDelete(`Owner has related records in ${link.table_name}`);
+          }
+        }
       }
     }
 
-    // ========================================
-    // DELETE SAFE CHILD DATA
-    // ========================================
+    // Remove only transient session data and the now-unreferenced owner profile.
+    // All work is in one transaction: if anything fails, nothing is deleted.
+    await client.query("DELETE FROM public.refresh_tokens WHERE user_id = $1", [id]);
+    await client.query("DELETE FROM public.user_sessions WHERE user_id = $1", [id]);
+    await client.query("DELETE FROM public.notifications WHERE user_id = $1", [id]);
+    await client.query("DELETE FROM public.owners WHERE user_id = $1", [id]);
 
-    await client.query(
-      `DELETE FROM refresh_tokens WHERE user_id = $1`,
+    const deleted = await client.query(
+      `DELETE FROM public.users WHERE id = $1
+       RETURNING id, full_name, email, role`,
       [id]
     );
-
-    await client.query(
-      `DELETE FROM user_sessions WHERE user_id = $1`,
-      [id]
-    );
-
-    await client.query(
-      `DELETE FROM notifications WHERE user_id = $1`,
-      [id]
-    );
-
-    // ========================================
-    // DELETE USER
-    // ========================================
-
-    const deleteResult = await client.query(
-      `
-      DELETE FROM users
-      WHERE id = $1
-      RETURNING
-        id,
-        full_name,
-        email,
-        role
-      `,
-      [id]
-    );
-
-    if (deleteResult.rows.length === 0) {
-      await client.query("ROLLBACK");
-
-      return res.status(404).json({
-        success: false,
-        message: "User not found"
-      });
-    }
 
     await client.query("COMMIT");
+    inTransaction = false;
 
     return res.status(200).json({
       success: true,
       message: "User deleted successfully",
-      user: deleteResult.rows[0]
+      user: deleted.rows[0]
     });
-
   } catch (error) {
-
-    await client.query("ROLLBACK");
-
+    if (inTransaction) {
+      try { await client.query("ROLLBACK"); } catch (_) {}
+    }
     console.error("DELETE USER ERROR:", error);
 
+    if (error.code === "23503") {
+      return res.status(409).json({
+        success: false,
+        message: "User cannot be deleted because other related records exist",
+        reason: error.constraint || "Foreign key dependency"
+      });
+    }
     return res.status(500).json({
       success: false,
       message: "Failed to delete user"
     });
-
   } finally {
     client.release();
   }
